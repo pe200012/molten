@@ -1,0 +1,15 @@
+resolver: lts-24.27
+compiler: ghc-9.12.2
+
+packages:
+- .
+- ../haskell-rocm/packages/rocm-ffi-core
+- ../haskell-rocm/packages/rocm-hip-runtime
+- ../haskell-rocm/packages/rocm-rocblas
+
+extra-include-dirs:
+- /usr/include
+
+extra-lib-dirs:
+- /usr/lib64
+- /usr/lib
