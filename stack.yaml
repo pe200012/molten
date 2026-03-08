@@ -6,6 +6,8 @@ packages:
 - ../haskell-rocm/packages/rocm-ffi-core
 - ../haskell-rocm/packages/rocm-hip-runtime
 - ../haskell-rocm/packages/rocm-rocblas
+- ../haskell-rocm/packages/rocm-rocfft
+- ../haskell-rocm/packages/rocm-rocrand
 
 extra-include-dirs:
 - /usr/include

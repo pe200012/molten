@@ -2,6 +2,7 @@ module Molten.Core.Future
   ( GpuFuture
   , await
   , makeFutureFromStream
+  , makeFutureFromStreamWith
   ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -13,11 +14,15 @@ import Molten.Core.Stream (Stream, streamDeviceId)
 data GpuFuture a = GpuFuture
   { futureStream :: !Stream
   , futureEventState :: !(MVar (Maybe Event))
-  , futureValue :: a
+  , futureValue :: !(IO a)
   }
 
 makeFutureFromStream :: HasCallStack => Stream -> a -> IO (GpuFuture a)
-makeFutureFromStream stream value = do
+makeFutureFromStream stream value =
+  makeFutureFromStreamWith stream (pure value)
+
+makeFutureFromStreamWith :: HasCallStack => Stream -> IO a -> IO (GpuFuture a)
+makeFutureFromStreamWith stream valueAction = do
   event <- createEvent (streamDeviceId stream)
   recordEvent event stream `onException` destroyEvent event
   state <- newMVar (Just event)
@@ -25,7 +30,7 @@ makeFutureFromStream stream value = do
     GpuFuture
       { futureStream = stream
       , futureEventState = state
-      , futureValue = value
+      , futureValue = valueAction
       }
 
 await :: HasCallStack => GpuFuture a -> IO a
@@ -38,4 +43,4 @@ await future = do
           synchronizeEvent event
           destroyEvent event
           pure (Nothing, ())
-  pure (futureValue future)
+  futureValue future

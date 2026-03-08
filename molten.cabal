@@ -20,6 +20,10 @@ extra-source-files:
     CHANGELOG.md
     docs/plans/2026-03-08-molten-highlevel-rocm-design.md
     docs/plans/2026-03-08-molten-highlevel-rocm-implementation.md
+    docs/plans/2026-03-08-molten-massiv-adapter-design.md
+    docs/plans/2026-03-08-molten-massiv-adapter-implementation.md
+    docs/plans/2026-03-08-molten-array-program-runtime-design.md
+    docs/plans/2026-03-08-molten-array-program-runtime-implementation.md
 
 source-repository head
   type: git
@@ -28,6 +32,11 @@ source-repository head
 library
   exposed-modules:
       Molten
+      Molten.Array.Device
+      Molten.Array.Expr
+      Molten.Array.Program
+      Molten.Array.Runtime
+      Molten.Array.Transfer
       Molten.BLAS
       Molten.BLAS.Native
       Molten.BLAS.Types
@@ -37,7 +46,14 @@ library
       Molten.Core.Future
       Molten.Core.Stream
       Molten.Core.Transfer
+      Molten.FFT
+      Molten.FFT.Runtime
+      Molten.Internal.HIPRTC
+      Molten.Internal.Scheduler
+      Molten.Interop.Massiv
       Molten.Interop.Vector
+      Molten.RAND
+      Molten.RAND.Runtime
   other-modules:
       Lib
       Molten.Core.Types
@@ -59,9 +75,15 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , mtl
     , rocm-ffi-core
     , rocm-hip-runtime
     , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
     , vector
   default-language: Haskell2010
 
@@ -84,10 +106,16 @@ executable molten-exe
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
     , molten
+    , mtl
     , rocm-ffi-core
     , rocm-hip-runtime
     , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
     , vector
   default-language: Haskell2010
 
@@ -95,12 +123,25 @@ test-suite molten-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Molten.Array.DeviceSpec
+      Molten.Array.ExprSpec
+      Molten.Array.ProgramGpuSpec
+      Molten.Array.ProgramSpec
+      Molten.Array.RuntimeSpec
+      Molten.Array.TransferSpec
+      Molten.BLAS.ArraySpec
       Molten.BLAS.HighLevelSpec
       Molten.BLAS.NativeSpec
       Molten.Core.BufferSpec
       Molten.Core.ContextSpec
       Molten.Core.GemmSpec
       Molten.Core.TransferSpec
+      Molten.FFT.GpuSpec
+      Molten.FFT.RuntimeSpec
+      Molten.Interop.MassivGpuSpec
+      Molten.Interop.MassivSpec
+      Molten.RAND.GpuSpec
+      Molten.RAND.RuntimeSpec
       Molten.TestSupport
       Paths_molten
   autogen-modules:
@@ -118,10 +159,16 @@ test-suite molten-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.18 && <5
+    , bytestring
+    , containers
     , hspec
+    , massiv
     , molten
+    , mtl
     , rocm-ffi-core
     , rocm-hip-runtime
     , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
     , vector
   default-language: Haskell2010

@@ -6,6 +6,7 @@ module Molten.Core.Event
   , eventReady
   , recordEvent
   , synchronizeEvent
+  , waitEvent
   , withRawHipEvent
   ) where
 
@@ -17,7 +18,7 @@ import Molten.Core.Types (DeviceId, Event(..))
 import Molten.Internal.Device (withDeviceId)
 import Molten.Internal.Validation (ensureDeviceMatch)
 import ROCm.FFI.Core.Types (HipEvent(..))
-import ROCm.HIP (hipEventCreate, hipEventDestroy, hipEventQuery, hipEventRecord, hipEventSynchronize)
+import ROCm.HIP (hipEventCreate, hipEventDestroy, hipEventQuery, hipEventRecord, hipEventSynchronize, hipStreamWaitEvent)
 
 createEvent :: HasCallStack => DeviceId -> IO Event
 createEvent deviceId =
@@ -44,6 +45,14 @@ recordEvent event stream = do
 synchronizeEvent :: HasCallStack => Event -> IO ()
 synchronizeEvent event =
   withDeviceId (eventDeviceId event) $ withRawHipEvent event hipEventSynchronize
+
+waitEvent :: HasCallStack => Stream -> Event -> IO ()
+waitEvent stream event = do
+  ensureDeviceMatch "waitEvent" (streamDeviceId stream) (eventDeviceId event)
+  withDeviceId (eventDeviceId event) $
+    withRawHipStream stream $ \rawStream ->
+      withRawHipEvent event $ \rawEvent ->
+        hipStreamWaitEvent rawStream rawEvent 0
 
 eventReady :: HasCallStack => Event -> IO Bool
 eventReady event =

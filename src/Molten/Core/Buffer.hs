@@ -6,6 +6,11 @@ module Molten.Core.Buffer
   , bufferDeviceId
   , bufferLength
   , bufferSizeInBytes
+  , destroyBuffer
+  , newDeviceBuffer
+  , newDeviceBufferOn
+  , newHostBuffer
+  , newPinnedBuffer
   , withDeviceBuffer
   , withDevicePtr
   , withHostBuffer
@@ -21,21 +26,22 @@ import Foreign.C.Types (CSize)
 import Foreign.ForeignPtr (finalizeForeignPtr, mallocForeignPtrArray, withForeignPtr)
 import Foreign.Storable (Storable, sizeOf)
 import GHC.Stack (HasCallStack)
-import Molten.Core.Context (Context, contextDeviceId, withContextDevice)
+import Molten.Core.Context (Context, contextDeviceId)
 import Molten.Core.Types (Buffer(..), DeviceId, Location(..))
+import Molten.Internal.Device (withDeviceId)
 import Molten.Internal.Validation (ensureNonNegative)
 import ROCm.FFI.Core.Exception (throwArgumentError)
 import ROCm.FFI.Core.Types (DevicePtr(..), HostPtr(..), PinnedHostPtr(..))
 import ROCm.HIP (hipFree, hipHostFree, hipHostMallocBytes, hipMallocBytes)
 
 withHostBuffer :: forall a r. (HasCallStack, Storable a) => Int -> (Buffer 'Host a -> IO r) -> IO r
-withHostBuffer length_ = bracket (allocateHostBuffer length_) freeBuffer
+withHostBuffer length_ = bracket (allocateHostBuffer "withHostBuffer" length_) destroyBuffer
 
 withPinnedBuffer :: forall a r. (HasCallStack, Storable a) => Int -> (Buffer 'PinnedHost a -> IO r) -> IO r
-withPinnedBuffer length_ = bracket (allocatePinnedBuffer length_) freeBuffer
+withPinnedBuffer length_ = bracket (allocatePinnedBuffer "withPinnedBuffer" length_) destroyBuffer
 
 withDeviceBuffer :: forall a r. (HasCallStack, Storable a) => Context -> Int -> (Buffer 'Device a -> IO r) -> IO r
-withDeviceBuffer ctx length_ = bracket (allocateDeviceBuffer ctx length_) freeBuffer
+withDeviceBuffer ctx length_ = bracket (allocateDeviceBuffer "withDeviceBuffer" ctx length_) destroyBuffer
 
 bufferLength :: Buffer loc a -> Int
 bufferLength buffer =
@@ -62,33 +68,48 @@ withDevicePtr :: Buffer 'Device a -> (DevicePtr a -> IO r) -> IO r
 withDevicePtr (DeviceBuffer _ foreignPtr _) action =
   withForeignPtr foreignPtr (action . DevicePtr)
 
-allocateHostBuffer :: forall a. (HasCallStack, Storable a) => Int -> IO (Buffer 'Host a)
-allocateHostBuffer length_ = do
-  ensureNonNegative "withHostBuffer" "length" length_
-  foreignPtr <- mallocForeignPtrArray length_
-  pure (HostBuffer foreignPtr length_)
+newHostBuffer :: forall a. (HasCallStack, Storable a) => Int -> IO (Buffer 'Host a)
+newHostBuffer = allocateHostBuffer "newHostBuffer"
 
-allocatePinnedBuffer :: forall a. (HasCallStack, Storable a) => Int -> IO (Buffer 'PinnedHost a)
-allocatePinnedBuffer length_ = do
-  bytes <- byteCountForLength (Proxy :: Proxy a) "withPinnedBuffer" length_
-  rawPtr@(PinnedHostPtr ptr) <- hipHostMallocBytes (allocationByteCount bytes)
-  foreignPtr <- FC.newForeignPtr ptr (hipHostFree rawPtr)
-  pure (PinnedHostBuffer foreignPtr length_)
+newPinnedBuffer :: forall a. (HasCallStack, Storable a) => Int -> IO (Buffer 'PinnedHost a)
+newPinnedBuffer = allocatePinnedBuffer "newPinnedBuffer"
 
-allocateDeviceBuffer :: forall a. (HasCallStack, Storable a) => Context -> Int -> IO (Buffer 'Device a)
-allocateDeviceBuffer ctx length_ = do
-  bytes <- byteCountForLength (Proxy :: Proxy a) "withDeviceBuffer" length_
-  withContextDevice ctx $ do
-    rawPtr@(DevicePtr ptr) <- hipMallocBytes (allocationByteCount bytes)
-    foreignPtr <- FC.newForeignPtr ptr (hipFree rawPtr)
-    pure (DeviceBuffer (contextDeviceId ctx) foreignPtr length_)
+newDeviceBuffer :: forall a. (HasCallStack, Storable a) => Context -> Int -> IO (Buffer 'Device a)
+newDeviceBuffer = allocateDeviceBuffer "newDeviceBuffer"
 
-freeBuffer :: Buffer loc a -> IO ()
-freeBuffer buffer =
+newDeviceBufferOn :: forall a. (HasCallStack, Storable a) => DeviceId -> Int -> IO (Buffer 'Device a)
+newDeviceBufferOn = allocateDeviceBufferOn "newDeviceBufferOn"
+
+destroyBuffer :: Buffer loc a -> IO ()
+destroyBuffer buffer =
   case buffer of
     HostBuffer foreignPtr _ -> finalizeForeignPtr foreignPtr
     PinnedHostBuffer foreignPtr _ -> finalizeForeignPtr foreignPtr
     DeviceBuffer _ foreignPtr _ -> finalizeForeignPtr foreignPtr
+
+allocateHostBuffer :: forall a. (HasCallStack, Storable a) => String -> Int -> IO (Buffer 'Host a)
+allocateHostBuffer functionName length_ = do
+  ensureNonNegative functionName "length" length_
+  foreignPtr <- mallocForeignPtrArray length_
+  pure (HostBuffer foreignPtr length_)
+
+allocatePinnedBuffer :: forall a. (HasCallStack, Storable a) => String -> Int -> IO (Buffer 'PinnedHost a)
+allocatePinnedBuffer functionName length_ = do
+  bytes <- byteCountForLength (Proxy :: Proxy a) functionName length_
+  rawPtr@(PinnedHostPtr ptr) <- hipHostMallocBytes (allocationByteCount bytes)
+  foreignPtr <- FC.newForeignPtr ptr (hipHostFree rawPtr)
+  pure (PinnedHostBuffer foreignPtr length_)
+
+allocateDeviceBuffer :: forall a. (HasCallStack, Storable a) => String -> Context -> Int -> IO (Buffer 'Device a)
+allocateDeviceBuffer functionName ctx = allocateDeviceBufferOn functionName (contextDeviceId ctx)
+
+allocateDeviceBufferOn :: forall a. (HasCallStack, Storable a) => String -> DeviceId -> Int -> IO (Buffer 'Device a)
+allocateDeviceBufferOn functionName deviceId length_ = do
+  bytes <- byteCountForLength (Proxy :: Proxy a) functionName length_
+  withDeviceId deviceId $ do
+    rawPtr@(DevicePtr ptr) <- hipMallocBytes (allocationByteCount bytes)
+    foreignPtr <- FC.newForeignPtr ptr (hipFree rawPtr)
+    pure (DeviceBuffer deviceId foreignPtr length_)
 
 byteCountForLength :: forall a proxy. (HasCallStack, Storable a) => proxy a -> String -> Int -> IO CSize
 byteCountForLength _ functionName length_ = do
