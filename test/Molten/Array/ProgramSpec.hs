@@ -9,7 +9,9 @@ import Data.List (isInfixOf)
 import qualified Data.Massiv.Array as A
 import Molten.Array.Expr (Binary(..), Unary(..), constant, (.+.))
 import Molten.Array.Program
-  ( buildProgram
+  ( broadcastRowsP
+  , buildProgram
+  , forLoopP
   , fillArrayP
   , inputArray
   , mapExpr
@@ -20,6 +22,8 @@ import Molten.Array.Program
   , reduceAll
   , reshapeValue
   , scheduleProgram
+  , softmaxRowsP
+  , sumRowsP
   , valueSize
   , withProgramRuntime
   , zipWithExpr
@@ -70,6 +74,37 @@ spec = do
           mapExpr (Unary (\x -> x .+. constant 1)) input0
       programNodeIds program `shouldBe` [0, 1]
       programNodeDependencies program `shouldBe` [(0, []), (1, [0])]
+
+    it "gives sumRowsP and broadcastRowsP the expected shapes" $ do
+      let input = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 3) (fromIntegral @Int @Int32) :: A.Array A.D A.Ix2 Int32)
+      program <-
+        buildProgram $ do
+          input0 <- inputArray input
+          rowSums <- sumRowsP input0
+          broadcastRowsP 3 rowSums
+      valueSize (programResultValue program) `shouldBe` A.Sz2 2 3
+
+    it "gives softmaxRowsP the same Ix2 shape as its input" $ do
+      let input = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 3) (fromIntegral :: Int -> Float) :: A.Array A.D A.Ix2 Float)
+      program <-
+        buildProgram $ do
+          input0 <- inputArray input
+          softmaxRowsP input0
+      valueSize (programResultValue program) `shouldBe` A.Sz2 2 3
+
+    it "rejects negative broadcast dimensions" $
+      buildProgram
+        (do
+          input0 <- fillArrayP @A.Ix1 @Int32 1 (A.Sz1 4)
+          broadcastRowsP (-1) input0)
+        `shouldThrow` isArgumentError "broadcastRowsP" "non-negative"
+
+    it "rejects nested forLoopP builders" $
+      buildProgram
+        (do
+          input0 <- fillArrayP @A.Ix1 @Int32 1 (A.Sz1 2)
+          forLoopP 1 input0 (\loopValue -> forLoopP 1 loopValue pure))
+        `shouldThrow` isArgumentError "forLoopP" "nested loops"
 
     it "rejects reshapeValue when totalElem changes" $
       buildProgram

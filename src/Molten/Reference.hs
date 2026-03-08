@@ -2,12 +2,18 @@ module Molten.Reference
   ( MatrixGemmRef(..)
   , ReferenceOutput(..)
   , axpyVectorRef
+  , broadcastColsRef
+  , broadcastRowsRef
   , dotVectorRef
   , gemmMatrixRef
   , mapArrayRef
+  , maxColsRef
+  , maxRowsRef
   , reduceAllArrayRef
   , reshapeArrayRef
   , runProgramCpu
+  , sumColsRef
+  , sumRowsRef
   , zipWithArrayRef
   ) where
 
@@ -17,6 +23,14 @@ import Molten.Internal.Reference.Array
   , reduceAllArrayRef
   , reshapeArrayRef
   , zipWithArrayRef
+  )
+import Molten.Internal.Reference.Axis2D
+  ( broadcastColsRef
+  , broadcastRowsRef
+  , maxColsRef
+  , maxRowsRef
+  , sumColsRef
+  , sumRowsRef
   )
 import Molten.Internal.Reference.BLAS
   ( MatrixGemmRef(..)

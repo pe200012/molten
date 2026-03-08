@@ -12,11 +12,15 @@ import Molten.Array.Expr
   , Exp
   , Unary(..)
   , evaluateBinaryExpression
+  , evaluateUnaryExpression
   , cast
   , constant
+  , expE
+  , recipE
   , renderBinaryExpression
   , renderUnaryExpression
   , select
+  , unary
   , (.+.)
   , (.*.)
   , (.<.)
@@ -47,6 +51,27 @@ spec = do
       let expression :: Binary (Complex Float) (Complex Float) (Complex Float)
           expression = Binary (\x y -> x .*. y .+. x)
       evaluateBinaryExpression expression (1 :+ 2) (3 :+ 4) `shouldBe` ((-4) :+ 12)
+
+  describe "floating expressions" $ do
+    it "evaluates expE on Float values" $ do
+      let expression :: Unary Float Float
+          expression = unary (expE . (.+. constant 1.0))
+      evaluateUnaryExpression expression 0.0 `shouldBe` exp 1.0
+
+    it "evaluates recipE on Double values" $ do
+      let expression :: Unary Double Double
+          expression = unary (recipE . (.+. constant 3.0))
+      evaluateUnaryExpression expression 1.0 `shouldBe` (0.25 :: Double)
+
+    it "renders expE using the float HIP intrinsic" $ do
+      let expression :: Unary Float Float
+          expression = unary expE
+      renderUnaryExpression expression `shouldBe` "expf(x0)"
+
+    it "renders recipE as scalar division" $ do
+      let expression :: Unary Double Double
+          expression = unary recipE
+      renderUnaryExpression expression `shouldBe` "((1.0) / (x0))"
 
   describe "ArrayScalar metadata" $ do
     it "exposes scalar names and HIP C type names for the supported surface types" $ do

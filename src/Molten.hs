@@ -1,5 +1,6 @@
 module Molten
-  ( module Molten.Array.Device
+  ( module Molten.Array.Axis2D
+  , module Molten.Array.Device
   , module Molten.Array.Expr
   , module Molten.Array.Program
   , module Molten.Array.Runtime
@@ -22,6 +23,7 @@ module Molten
   , module Molten.Reference
   ) where
 
+import Molten.Array.Axis2D
 import Molten.Array.Device
 import Molten.Array.Expr
 import Molten.Array.Program

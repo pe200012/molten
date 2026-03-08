@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Test.Hspec (Spec, describe, hspec)
+import qualified Molten.Array.Axis2DSpec as Axis2DSpec
 import qualified Molten.Array.DeviceSpec as DeviceSpec
 import qualified Molten.Array.ExprSpec as ExprSpec
 import qualified Molten.Array.ProgramGpuSpec as ProgramGpuSpec
@@ -14,6 +14,8 @@ import qualified Molten.Core.BufferSpec as BufferSpec
 import qualified Molten.Core.ContextSpec as ContextSpec
 import qualified Molten.Core.GemmSpec as GemmSpec
 import qualified Molten.Core.TransferSpec as TransferSpec
+import qualified Molten.Examples.AttentionSpec as AttentionSpec
+import qualified Molten.Examples.BlackScholesAsianSpec as BlackScholesAsianSpec
 import qualified Molten.Examples.CommonSpec as ExampleCommonSpec
 import qualified Molten.Examples.Heat2dFftSpec as Heat2dFftSpec
 import qualified Molten.Examples.MlpForwardSpec as MlpForwardSpec
@@ -25,8 +27,10 @@ import qualified Molten.Interop.MassivSpec as MassivSpec
 import qualified Molten.RAND.GpuSpec as RandGpuSpec
 import qualified Molten.RAND.RuntimeSpec as RandRuntimeSpec
 import qualified Molten.Reference.ArraySpec as ReferenceArraySpec
+import qualified Molten.Reference.Axis2DSpec as ReferenceAxis2DSpec
 import qualified Molten.Reference.BlasSpec as ReferenceBlasSpec
 import qualified Molten.Reference.ProgramSpec as ReferenceProgramSpec
+import Test.Hspec (Spec, describe, hspec)
 
 main :: IO ()
 main = hspec spec
@@ -39,6 +43,7 @@ spec = do
   describe "Molten.Core.Gemm" GemmSpec.spec
   describe "Molten.BLAS.Native" NativeSpec.spec
   describe "Molten.BLAS.HighLevel" HighLevelSpec.spec
+  describe "Molten.Array.Axis2D" Axis2DSpec.spec
   describe "Molten.Array.Device" DeviceSpec.spec
   describe "Molten.Array.Expr" ExprSpec.spec
   describe "Molten.Array.Program" ProgramSpec.spec
@@ -46,6 +51,8 @@ spec = do
   describe "Molten.Array.Runtime" RuntimeSpec.spec
   describe "Molten.Array.Transfer" ArrayTransferSpec.spec
   describe "Molten.BLAS.Array" ArrayBlasSpec.spec
+  describe "Molten.Examples.Attention" AttentionSpec.spec
+  describe "Molten.Examples.BlackScholesAsian" BlackScholesAsianSpec.spec
   describe "Molten.Examples.Common" ExampleCommonSpec.spec
   describe "Molten.Examples.MlpForward" MlpForwardSpec.spec
   describe "Molten.Examples.Heat2dFft" Heat2dFftSpec.spec
@@ -57,5 +64,6 @@ spec = do
   describe "Molten.RAND.Runtime" RandRuntimeSpec.spec
   describe "Molten.RAND.GPU" RandGpuSpec.spec
   describe "Molten.Reference.Array" ReferenceArraySpec.spec
+  describe "Molten.Reference.Axis2D" ReferenceAxis2DSpec.spec
   describe "Molten.Reference.Blas" ReferenceBlasSpec.spec
   describe "Molten.Reference.Program" ReferenceProgramSpec.spec

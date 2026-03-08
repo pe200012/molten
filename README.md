@@ -83,7 +83,7 @@ HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run
 
 ## Examples
 
-仓库现在提供三个默认就会跑 **stress workload + self-check** 的 example executables：
+仓库现在提供五个默认就会跑 **stress workload + self-check** 的 example executables：
 
 ### 1. `molten-example-mlp-forward`
 
@@ -132,6 +132,38 @@ HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-monte-carlo-bachelier -
 ```
 
 默认会重复两次同 seed 运行，检查结果重现性、非负价格与 95% 置信区间的基本一致性。失败时直接退出失败。
+
+### 4. `molten-example-attention-forward`
+
+覆盖：`softmaxRowsP`、2D row-wise reduction / broadcast、`Program` attention forward、CPU-vs-GPU shadow check。
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-attention-forward
+```
+
+可选参数：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-attention-forward -- --tokens 2048 --model 128 --value 128
+```
+
+默认先跑一个小规模 shadow case，对比 CPU reference 与 GPU attention forward；随后再跑较大的 GPU stress case，并检查 softmax 每行和接近 1。失败时直接退出失败。
+
+### 5. `molten-example-black-scholes-asian`
+
+覆盖：`forLoopP`、`LoopNode`、多时间步 Black-Scholes path simulation、Arithmetic Asian payoff、shadow + stress 双路径验证。
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-black-scholes-asian
+```
+
+可选参数：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-black-scholes-asian -- --paths 1000000 --steps 252 --spot 100 --strike 100 --rate 0.05 --vol 0.2 --maturity 1 --seed 12345
+```
+
+默认先跑 host normals 驱动的 CPU-vs-GPU shadow case，再跑真实 `RAND + LoopNode` 的 stress case，并检查非负价格、有限标准误差、95% 置信区间与 fixed-seed 重复性。失败时直接退出失败。
 
 ## 测试策略
 

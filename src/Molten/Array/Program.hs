@@ -3,11 +3,13 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Molten.Array.Program
-  ( MatrixGemmValue(..)
+  ( LoopState
+  , MatrixGemmValue(..)
   , Program
   , ProgramBuilder
   , ProgramOutput(..)
@@ -15,14 +17,19 @@ module Molten.Array.Program
   , ReferenceOutput(..)
   , Value
   , axpyVectorP
+  , broadcastColsP
+  , broadcastRowsP
   , buildProgram
   , fillArrayP
   , fftForwardP
   , fftInverseP
+  , forLoopP
   , gemmMatrixP
   , inputArray
   , inputDeviceArray
   , mapExpr
+  , maxColsP
+  , maxRowsP
   , programNodeDependencies
   , programNodeIds
   , programResultValue
@@ -33,6 +40,9 @@ module Molten.Array.Program
   , runProgram
   , runProgramCpu
   , scheduleProgram
+  , softmaxRowsP
+  , sumColsP
+  , sumRowsP
   , valueId
   , valueSize
   , withProgramRuntime
@@ -46,22 +56,51 @@ import Control.Monad.State.Strict (StateT, get, modify', runStateT)
 import qualified Data.Dynamic as Dynamic
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Typeable (Typeable)
+import qualified Data.Set as Set
+import Data.Typeable (Typeable, cast)
 import qualified Data.Massiv.Array as A
 import Foreign.Storable (Storable)
 import GHC.Stack (HasCallStack)
 import Molten.Array.Device (DeviceArray, deviceArraySize, mkDeviceArray)
-import Molten.Array.Expr (ArrayScalar, Binary, NumericExp, Unary)
+import Molten.Array.Expr
+  ( ArrayScalar
+  , Binary
+  , Comparable
+  , FloatingExp
+  , NumericExp
+  , Unary
+  , binary
+  , constant
+  , expE
+  , recipE
+  , unary
+  , (.+.)
+  , (.*.)
+  )
 import Molten.Array.Runtime
   ( ArrayRuntime
+  , broadcastColsArrayOn
+  , broadcastRowsArrayOn
   , fillArrayOn
   , mapArrayOn
+  , maxColsArrayOn
+  , maxRowsArrayOn
   , reduceAllArrayOn
+  , sumColsArrayOn
+  , sumRowsArrayOn
   , withArrayRuntime
   , zipWithArrayOn
   )
 import Molten.Array.Transfer (cloneDeviceArray, copyHostArrayToDevice, reshapeDeviceArray)
 import Molten.Internal.Reference.Array (fillArrayRef, mapArrayRef, reduceAllArrayRef, reshapeArrayRef, zipWithArrayRef)
+import Molten.Internal.Reference.Axis2D
+  ( broadcastColsRef
+  , broadcastRowsRef
+  , maxColsRef
+  , maxRowsRef
+  , sumColsRef
+  , sumRowsRef
+  )
 import Molten.Internal.Reference.BLAS (MatrixGemmRef(..), axpyVectorRef, gemmMatrixRef)
 import Molten.BLAS (MatrixGemm(..), axpyVector, gemmMatrix)
 import Molten.BLAS.Types (BlasElement, Transpose)
@@ -116,6 +155,7 @@ data ProgramRuntime = ProgramRuntime
 
 data BuilderState = BuilderState
   { builderNextValueId :: !Int
+  , builderInsideLoop :: !Bool
   , builderNodesRev :: ![ProgramNode]
   }
 
@@ -142,6 +182,24 @@ data ProgramNode
     (A.Index ix, A.Index ix', Typeable ix, Typeable ix', Typeable a, Storable a) =>
     ReshapeNode !(Value ix' a) !(Value ix a)
   | forall a.
+    (Typeable a, ArrayScalar a, NumericExp a) =>
+    SumRowsNode !(Value A.Ix1 a) !(Value A.Ix2 a)
+  | forall a.
+    (Typeable a, ArrayScalar a, NumericExp a) =>
+    SumColsNode !(Value A.Ix1 a) !(Value A.Ix2 a)
+  | forall a.
+    (Typeable a, ArrayScalar a, Comparable a) =>
+    MaxRowsNode !(Value A.Ix1 a) !(Value A.Ix2 a)
+  | forall a.
+    (Typeable a, ArrayScalar a, Comparable a) =>
+    MaxColsNode !(Value A.Ix1 a) !(Value A.Ix2 a)
+  | forall a.
+    (Typeable a, ArrayScalar a) =>
+    BroadcastRowsNode !(Value A.Ix2 a) !Int !(Value A.Ix1 a)
+  | forall a.
+    (Typeable a, ArrayScalar a) =>
+    BroadcastColsNode !(Value A.Ix2 a) !Int !(Value A.Ix1 a)
+  | forall a.
     (Typeable a, BlasElement a, Num a, Storable a) =>
     AxpyNode !(Value A.Ix1 a) !a !(Value A.Ix1 a) !(Value A.Ix1 a)
   | forall a.
@@ -159,6 +217,41 @@ data ProgramNode
   | forall ix a.
     (A.Index ix, Typeable ix, Typeable a, RandNormal a, ArrayScalar a) =>
     RandNormalNode !(Value ix a) !RandGeneratorConfig !a !a
+  | LoopNode !LoopToken !LoopSpec
+  | LoopResultNode !SomeValue !LoopToken !Int
+
+newtype LoopToken = LoopToken {loopTokenId :: Int}
+  deriving (Eq, Show)
+
+data SomeValue = forall ix a.
+  (A.Index ix, Typeable ix, Typeable a, Storable a) =>
+  SomeValue !(Value ix a)
+
+class LoopState s where
+  traverseLoopState :: Applicative f => (forall ix a. (A.Index ix, Typeable ix, Typeable a, Storable a) => Value ix a -> f (Value ix a)) -> s -> f s
+  flattenLoopState :: s -> [SomeValue]
+
+instance LoopState () where
+  traverseLoopState _ () = pure ()
+  flattenLoopState () = []
+
+instance (A.Index ix, Typeable ix, Typeable a, Storable a) => LoopState (Value ix a) where
+  traverseLoopState function value = function value
+  flattenLoopState value = [SomeValue value]
+
+instance (LoopState a, LoopState b) => LoopState (a, b) where
+  traverseLoopState function (left, right) = (,) <$> traverseLoopState function left <*> traverseLoopState function right
+  flattenLoopState (left, right) = flattenLoopState left <> flattenLoopState right
+
+data LoopSpec = LoopSpec
+  { loopIterations :: !Int
+  , loopInitialState :: ![SomeValue]
+  , loopPlaceholderState :: ![SomeValue]
+  , loopFinalState :: ![SomeValue]
+  , loopResultTargets :: ![SomeValue]
+  , loopCapturedIds :: ![Int]
+  , loopBodyNodes :: ![ProgramNode]
+  }
 
 class ProgramOutput a where
   type ProgramResult a
@@ -219,7 +312,7 @@ buildProgram builder = do
   pure Program {programNodes = reverse (builderNodesRev finalState), programResult = result}
 
 initialBuilderState :: BuilderState
-initialBuilderState = BuilderState {builderNextValueId = 0, builderNodesRev = []}
+initialBuilderState = BuilderState {builderNextValueId = 0, builderInsideLoop = False, builderNodesRev = []}
 
 inputDeviceArray :: (A.Index ix, Typeable ix, Typeable a, Storable a) => DeviceArray ix a -> ProgramBuilder (Value ix a)
 inputDeviceArray deviceArray = do
@@ -269,6 +362,66 @@ reshapeValue targetSize inputValue = do
   emitNode (ReshapeNode outputValue inputValue)
   pure outputValue
 
+sumRowsP :: (Typeable a, ArrayScalar a, NumericExp a) => Value A.Ix2 a -> ProgramBuilder (Value A.Ix1 a)
+sumRowsP inputValue = do
+  let A.Sz2 rows _ = valueSize inputValue
+  outputValue <- freshValue (A.Sz1 rows)
+  emitNode (SumRowsNode outputValue inputValue)
+  pure outputValue
+
+sumColsP :: (Typeable a, ArrayScalar a, NumericExp a) => Value A.Ix2 a -> ProgramBuilder (Value A.Ix1 a)
+sumColsP inputValue = do
+  let A.Sz2 _ cols = valueSize inputValue
+  outputValue <- freshValue (A.Sz1 cols)
+  emitNode (SumColsNode outputValue inputValue)
+  pure outputValue
+
+maxRowsP :: (Typeable a, ArrayScalar a, Comparable a) => Value A.Ix2 a -> ProgramBuilder (Value A.Ix1 a)
+maxRowsP inputValue = do
+  let A.Sz2 rows _ = valueSize inputValue
+  outputValue <- freshValue (A.Sz1 rows)
+  emitNode (MaxRowsNode outputValue inputValue)
+  pure outputValue
+
+maxColsP :: (Typeable a, ArrayScalar a, Comparable a) => Value A.Ix2 a -> ProgramBuilder (Value A.Ix1 a)
+maxColsP inputValue = do
+  let A.Sz2 _ cols = valueSize inputValue
+  outputValue <- freshValue (A.Sz1 cols)
+  emitNode (MaxColsNode outputValue inputValue)
+  pure outputValue
+
+broadcastRowsP :: (Typeable a, ArrayScalar a) => Int -> Value A.Ix1 a -> ProgramBuilder (Value A.Ix2 a)
+broadcastRowsP cols inputValue = do
+  when (cols < 0) (liftIO (throwArgumentError "broadcastRowsP" "column count must be non-negative"))
+  let A.Sz1 rows = valueSize inputValue
+  outputValue <- freshValue (A.Sz2 rows cols)
+  emitNode (BroadcastRowsNode outputValue cols inputValue)
+  pure outputValue
+
+broadcastColsP :: (Typeable a, ArrayScalar a) => Int -> Value A.Ix1 a -> ProgramBuilder (Value A.Ix2 a)
+broadcastColsP rows inputValue = do
+  when (rows < 0) (liftIO (throwArgumentError "broadcastColsP" "row count must be non-negative"))
+  let A.Sz1 cols = valueSize inputValue
+  outputValue <- freshValue (A.Sz2 rows cols)
+  emitNode (BroadcastColsNode outputValue rows inputValue)
+  pure outputValue
+
+softmaxRowsP :: forall a. (Typeable a, ArrayScalar a, FloatingExp a, Comparable a, Num a) => Value A.Ix2 a -> ProgramBuilder (Value A.Ix2 a)
+softmaxRowsP inputValue = do
+  let A.Sz2 _ cols = valueSize inputValue
+      centerBinary :: Binary a a a
+      centerBinary = binary (\x y -> x .+. (constant (-1) .*. y))
+      scaleBinary :: Binary a a a
+      scaleBinary = binary (\x y -> x .*. y)
+  rowMax <- maxRowsP inputValue
+  rowMaxMatrix <- broadcastRowsP cols rowMax
+  centered <- zipWithExpr centerBinary inputValue rowMaxMatrix
+  exponentiated <- mapExpr (unary expE) centered
+  rowSums <- sumRowsP exponentiated
+  inverseRowSums <- mapExpr (unary recipE) rowSums
+  inverseRowSumsMatrix <- broadcastRowsP cols inverseRowSums
+  zipWithExpr scaleBinary exponentiated inverseRowSumsMatrix
+
 axpyVectorP :: (Typeable a, BlasElement a, Num a, Storable a) => a -> Value A.Ix1 a -> Value A.Ix1 a -> ProgramBuilder (Value A.Ix1 a)
 axpyVectorP alpha xValue yValue = do
   when (valueSize xValue /= valueSize yValue) (liftIO (throwArgumentError "axpyVectorP" "input vectors must have the same shape"))
@@ -306,6 +459,54 @@ randNormalP config meanValue stddevValue size = do
   emitNode (RandNormalNode outputValue config meanValue stddevValue)
   pure outputValue
 
+forLoopP :: LoopState s => Int -> s -> (s -> ProgramBuilder s) -> ProgramBuilder s
+forLoopP iterations initialState bodyBuilder = do
+  when (iterations < 0) (liftIO (throwArgumentError "forLoopP" "iteration count must be non-negative"))
+  insideLoop <- ProgramBuilder (builderInsideLoop <$> get)
+  when insideLoop (liftIO (throwArgumentError "forLoopP" "nested loops are not supported"))
+  token <- freshLoopToken
+  placeholderState <- traverseLoopState freshLike initialState
+  outerState <- ProgramBuilder get
+  (finalState, loopBuilderState) <-
+    liftIO $
+      runStateT
+        (unProgramBuilder (bodyBuilder placeholderState))
+        BuilderState
+          { builderNextValueId = builderNextValueId outerState
+          , builderInsideLoop = True
+          , builderNodesRev = []
+          }
+  let initialValues = flattenLoopState initialState
+      finalValues = flattenLoopState finalState
+  when (not (loopStateShapesMatch initialValues finalValues)) (liftIO (throwArgumentError "forLoopP" "loop body must preserve state shape"))
+  ProgramBuilder $ modify' $ \state -> state {builderNextValueId = builderNextValueId loopBuilderState}
+  resultState <- traverseLoopState freshLike finalState
+  let placeholderValues = flattenLoopState placeholderState
+      resultValues = flattenLoopState resultState
+      bodyNodes = reverse (builderNodesRev loopBuilderState)
+      placeholderIds = Set.fromList (fmap someValueId placeholderValues)
+      bodyOutputIds = Set.fromList (fmap programNodeOutputId bodyNodes)
+      capturedIds =
+        Set.toAscList
+          ( Set.fromList (concatMap programNodeInputIds bodyNodes)
+              `Set.difference` placeholderIds
+              `Set.difference` bodyOutputIds
+          )
+      loopSpec =
+        LoopSpec
+          { loopIterations = iterations
+          , loopInitialState = initialValues
+          , loopPlaceholderState = placeholderValues
+          , loopFinalState = finalValues
+          , loopResultTargets = resultValues
+          , loopCapturedIds = capturedIds
+          , loopBodyNodes = bodyNodes
+          }
+  emitNode (LoopNode token loopSpec)
+  forM_ (zip [0 ..] resultValues) $ \(resultIndex, resultValue) ->
+    emitNode (LoopResultNode resultValue token resultIndex)
+  pure resultState
+
 programNodeIds :: Program a -> [Int]
 programNodeIds = fmap programNodeOutputId . programNodes
 
@@ -334,12 +535,37 @@ runProgramCpu program = do
   resolveReferenceOutput referenceStore (programResult program)
 
 freshValue :: A.Sz ix -> ProgramBuilder (Value ix a)
-freshValue size =
+freshValue size = do
+  nextId <- freshBuilderId
+  pure Value {valueId = nextId, valueSize = size}
+
+freshLoopToken :: ProgramBuilder LoopToken
+freshLoopToken = LoopToken <$> freshBuilderId
+
+freshLike :: Value ix a -> ProgramBuilder (Value ix a)
+freshLike value = freshValue (valueSize value)
+
+freshBuilderId :: ProgramBuilder Int
+freshBuilderId =
   ProgramBuilder $ do
     state <- get
     let nextId = builderNextValueId state
     modify' $ \currentState -> currentState {builderNextValueId = nextId + 1}
-    pure Value {valueId = nextId, valueSize = size}
+    pure nextId
+
+someValueId :: SomeValue -> Int
+someValueId (SomeValue value) = valueId value
+
+loopStateShapesMatch :: [SomeValue] -> [SomeValue] -> Bool
+loopStateShapesMatch leftValues rightValues =
+  length leftValues == length rightValues
+    && and (zipWith sameLoopShape leftValues rightValues)
+
+sameLoopShape :: SomeValue -> SomeValue -> Bool
+sameLoopShape (SomeValue (leftValue :: Value ix a)) (SomeValue rightValue) =
+  case cast rightValue of
+    Just (castValue :: Value ix a) -> valueSize leftValue == valueSize castValue
+    Nothing -> False
 
 emitNode :: ProgramNode -> ProgramBuilder ()
 emitNode node =
@@ -361,7 +587,10 @@ type ValueStore = Map Int Dynamic.Dynamic
 type ReferenceStore = Map Int Dynamic.Dynamic
 
 executeReferenceProgram :: HasCallStack => [ProgramNode] -> IO ReferenceStore
-executeReferenceProgram = foldM executeReferenceNode Map.empty
+executeReferenceProgram = executeReferenceProgramFromStore Map.empty
+
+executeReferenceProgramFromStore :: HasCallStack => ReferenceStore -> [ProgramNode] -> IO ReferenceStore
+executeReferenceProgramFromStore initialStore = foldM executeReferenceNode initialStore
 
 executeReferenceNode :: HasCallStack => ReferenceStore -> ProgramNode -> IO ReferenceStore
 executeReferenceNode store node =
@@ -390,6 +619,35 @@ executeReferenceNode store node =
       hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
       hostArray <- reshapeArrayRef (valueSize outputValue) hostInput
       pure (storeReferenceValue store outputValue hostArray)
+    SumRowsNode outputValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- sumRowsRef hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    SumColsNode outputValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- sumColsRef hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    MaxRowsNode outputValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- maxRowsRef hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    MaxColsNode outputValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- maxColsRef hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    BroadcastRowsNode outputValue cols inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- broadcastRowsRef cols hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    BroadcastColsNode outputValue rows inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- broadcastColsRef rows hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    LoopNode _ loopSpec -> do
+      loopResults <- executeReferenceLoop store loopSpec
+      pure (storeLoopResults store loopResults)
+    LoopResultNode _ _ _ ->
+      pure store
     AxpyNode outputValue alpha xValue yValue -> do
       xArray <- lookupStoredReferenceValue "runProgramCpu" store xValue
       yArray <- lookupStoredReferenceValue "runProgramCpu" store yValue
@@ -420,8 +678,35 @@ executeReferenceNode store node =
     RandNormalNode _ _ _ _ ->
       throwArgumentError "runProgramCpu" "unsupported reference node: RandNormalNode"
 
+executeReferenceLoop :: HasCallStack => ReferenceStore -> LoopSpec -> IO [(SomeValue, Dynamic.Dynamic)]
+executeReferenceLoop outerStore loopSpec = do
+  initialDynamics <- mapM (lookupStoredDynamic "runProgramCpu" outerStore) (loopInitialState loopSpec)
+  finalDynamics <- go initialDynamics
+  pure (zip (loopResultTargets loopSpec) finalDynamics)
+  where
+    capturedStore = Map.restrictKeys outerStore (Set.fromList (loopCapturedIds loopSpec))
+
+    go :: [Dynamic.Dynamic] -> IO [Dynamic.Dynamic]
+    go currentStateDynamics =
+      if loopIterations loopSpec <= 0
+        then pure currentStateDynamics
+        else iterateLoop (loopIterations loopSpec) currentStateDynamics
+
+    iterateLoop :: Int -> [Dynamic.Dynamic] -> IO [Dynamic.Dynamic]
+    iterateLoop remaining currentStateDynamics = do
+      let iterationStore = Map.union (bindLoopDynamics (loopPlaceholderState loopSpec) currentStateDynamics) capturedStore
+      bodyStore <- executeReferenceProgramFromStore iterationStore (loopBodyNodes loopSpec)
+      nextStateDynamics <- mapM (lookupStoredDynamic "runProgramCpu" bodyStore) (loopFinalState loopSpec)
+      if remaining == 1
+        then pure nextStateDynamics
+        else iterateLoop (remaining - 1) nextStateDynamics
+
 executeScheduledProgram :: HasCallStack => ProgramRuntime -> [ScheduledNode] -> [ProgramNode] -> IO ValueStore
-executeScheduledProgram runtime scheduledNodes nodes = do
+executeScheduledProgram runtime scheduledNodes nodes =
+  executeScheduledProgramFromStore runtime Map.empty scheduledNodes nodes
+
+executeScheduledProgramFromStore :: HasCallStack => ProgramRuntime -> ValueStore -> [ScheduledNode] -> [ProgramNode] -> IO ValueStore
+executeScheduledProgramFromStore runtime initialStore scheduledNodes nodes = do
   let nodeMap = Map.fromList [(programNodeOutputId node, node) | node <- nodes]
       executeOne :: (ValueStore, Map Int Event, Map Int Int) -> ScheduledNode -> IO (ValueStore, Map Int Event, Map Int Int)
       executeOne (store, eventMap, slotMap) scheduledNode = do
@@ -437,7 +722,7 @@ executeScheduledProgram runtime scheduledNodes nodes = do
             eventMap' = maybe eventMap (\event -> Map.insert (scheduledNodeId scheduledNode) event eventMap) propagatedEvent
             slotMap' = Map.insert (scheduledNodeId scheduledNode) streamSlot slotMap
         pure (store', eventMap', slotMap')
-  (store, eventMap, _) <- foldM executeOne (Map.empty, Map.empty, Map.empty) scheduledNodes
+  (store, eventMap, _) <- foldM executeOne (initialStore, Map.empty, Map.empty) scheduledNodes
   mapM_ synchronizeStream (programRuntimeStreams runtime)
   mapM_ destroyEvent (Map.elems eventMap)
   pure store
@@ -483,6 +768,42 @@ executeNode runtime stream node store =
       deviceArray <- reshapeDeviceArray (valueSize outputValue) inputArray
       event <- recordNodeEvent stream
       pure (storeValue store outputValue deviceArray, Just event)
+    SumRowsNode outputValue inputValue -> do
+      inputArray <- lookupStoredValue "SumRowsNode" store inputValue
+      deviceArray <- sumRowsArrayOn stream (programRuntimeArrayRuntime runtime) inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    SumColsNode outputValue inputValue -> do
+      inputArray <- lookupStoredValue "SumColsNode" store inputValue
+      deviceArray <- sumColsArrayOn stream (programRuntimeArrayRuntime runtime) inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    MaxRowsNode outputValue inputValue -> do
+      inputArray <- lookupStoredValue "MaxRowsNode" store inputValue
+      deviceArray <- maxRowsArrayOn stream (programRuntimeArrayRuntime runtime) inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    MaxColsNode outputValue inputValue -> do
+      inputArray <- lookupStoredValue "MaxColsNode" store inputValue
+      deviceArray <- maxColsArrayOn stream (programRuntimeArrayRuntime runtime) inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    BroadcastRowsNode outputValue cols inputValue -> do
+      inputArray <- lookupStoredValue "BroadcastRowsNode" store inputValue
+      deviceArray <- broadcastRowsArrayOn stream (programRuntimeArrayRuntime runtime) cols inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    BroadcastColsNode outputValue rows inputValue -> do
+      inputArray <- lookupStoredValue "BroadcastColsNode" store inputValue
+      deviceArray <- broadcastColsArrayOn stream (programRuntimeArrayRuntime runtime) rows inputArray
+      event <- recordNodeEvent stream
+      pure (storeValue store outputValue deviceArray, Just event)
+    LoopNode _ loopSpec -> do
+      loopResults <- executeScheduledLoop runtime store loopSpec
+      event <- recordNodeEvent (contextDefaultStream (programRuntimeContext runtime))
+      pure (storeLoopResults store loopResults, Just event)
+    LoopResultNode _ _ _ ->
+      pure (store, Nothing)
     AxpyNode outputValue alpha xValue yValue -> do
       xArray <- lookupStoredValue "AxpyNode" store xValue
       yArray <- lookupStoredValue "AxpyNode" store yValue
@@ -528,6 +849,57 @@ executeNode runtime stream node store =
       randNormalOn stream (programRuntimeRandRuntime runtime) config meanValue stddevValue deviceArray
       event <- recordNodeEvent stream
       pure (storeValue store outputValue deviceArray, Just event)
+
+executeScheduledLoop :: HasCallStack => ProgramRuntime -> ValueStore -> LoopSpec -> IO [(SomeValue, Dynamic.Dynamic)]
+executeScheduledLoop runtime outerStore loopSpec = do
+  initialDynamics <- mapM (lookupStoredDynamic "LoopNode" outerStore) (loopInitialState loopSpec)
+  scheduledBodyNodes <- scheduleLoopBody runtime (loopBodyNodes loopSpec)
+  finalDynamics <- go scheduledBodyNodes initialDynamics
+  pure (zip (loopResultTargets loopSpec) finalDynamics)
+  where
+    capturedStore = Map.restrictKeys outerStore (Set.fromList (loopCapturedIds loopSpec))
+
+    go :: [ScheduledNode] -> [Dynamic.Dynamic] -> IO [Dynamic.Dynamic]
+    go scheduledBodyNodes currentStateDynamics =
+      if loopIterations loopSpec <= 0
+        then pure currentStateDynamics
+        else iterateLoop scheduledBodyNodes (loopIterations loopSpec) currentStateDynamics
+
+    iterateLoop :: [ScheduledNode] -> Int -> [Dynamic.Dynamic] -> IO [Dynamic.Dynamic]
+    iterateLoop scheduledBodyNodes remaining currentStateDynamics = do
+      let iterationStore = Map.union (bindLoopDynamics (loopPlaceholderState loopSpec) currentStateDynamics) capturedStore
+      bodyStore <- executeScheduledProgramFromStore runtime iterationStore scheduledBodyNodes (loopBodyNodes loopSpec)
+      nextStateDynamics <- mapM (lookupStoredDynamic "LoopNode" bodyStore) (loopFinalState loopSpec)
+      if remaining == 1
+        then pure nextStateDynamics
+        else iterateLoop scheduledBodyNodes (remaining - 1) nextStateDynamics
+
+scheduleLoopBody :: HasCallStack => ProgramRuntime -> [ProgramNode] -> IO [ScheduledNode]
+scheduleLoopBody runtime bodyNodes =
+  scheduleNodes (length (programRuntimeStreams runtime)) schedulerNodes
+  where
+    bodyNodeIds = Set.fromList (fmap programNodeOutputId bodyNodes)
+    toLoopSchedulerNode :: ProgramNode -> SchedulerNode
+    toLoopSchedulerNode node =
+      let schedulerNode = toSchedulerNode node
+       in schedulerNode {schedulerNodeDependencies = filter (`Set.member` bodyNodeIds) (schedulerNodeDependencies schedulerNode)}
+    schedulerNodes = fmap toLoopSchedulerNode bodyNodes
+
+bindLoopDynamics :: [SomeValue] -> [Dynamic.Dynamic] -> Map Int Dynamic.Dynamic
+bindLoopDynamics placeholders dynamics =
+  Map.fromList (zipWith (\placeholder dynamicValue -> (someValueId placeholder, dynamicValue)) placeholders dynamics)
+
+lookupStoredDynamic :: HasCallStack => String -> Map Int Dynamic.Dynamic -> SomeValue -> IO Dynamic.Dynamic
+lookupStoredDynamic functionName store someValue =
+  case Map.lookup (someValueId someValue) store of
+    Just dynamicValue -> pure dynamicValue
+    Nothing -> throwArgumentError functionName ("missing loop value: " <> show (someValueId someValue))
+
+storeLoopResults :: Map Int Dynamic.Dynamic -> [(SomeValue, Dynamic.Dynamic)] -> Map Int Dynamic.Dynamic
+storeLoopResults = foldl storeOne
+  where
+    storeOne currentStore (someValue, dynamicValue) =
+      Map.insert (someValueId someValue) dynamicValue currentStore
 
 allocateProgramArray :: (A.Index ix, Storable a) => Stream -> Value ix a -> IO (DeviceArray ix a)
 allocateProgramArray stream outputValue = do
@@ -582,12 +954,20 @@ programNodeOutputId node =
     ZipNode outputValue _ _ _ -> valueId outputValue
     ReduceNode outputValue _ _ _ -> valueId outputValue
     ReshapeNode outputValue _ -> valueId outputValue
+    SumRowsNode outputValue _ -> valueId outputValue
+    SumColsNode outputValue _ -> valueId outputValue
+    MaxRowsNode outputValue _ -> valueId outputValue
+    MaxColsNode outputValue _ -> valueId outputValue
+    BroadcastRowsNode outputValue _ _ -> valueId outputValue
+    BroadcastColsNode outputValue _ _ -> valueId outputValue
     AxpyNode outputValue _ _ _ -> valueId outputValue
     GemmNode outputValue _ -> valueId outputValue
     FftForwardNode outputValue _ -> valueId outputValue
     FftInverseNode outputValue _ -> valueId outputValue
     RandUniformNode outputValue _ -> valueId outputValue
     RandNormalNode outputValue _ _ _ -> valueId outputValue
+    LoopNode loopToken _ -> loopTokenId loopToken
+    LoopResultNode (SomeValue outputValue) _ _ -> valueId outputValue
 
 programNodeInputIds :: ProgramNode -> [Int]
 programNodeInputIds node =
@@ -599,12 +979,20 @@ programNodeInputIds node =
     ZipNode _ _ leftValue rightValue -> [valueId leftValue, valueId rightValue]
     ReduceNode _ _ _ inputValue -> [valueId inputValue]
     ReshapeNode _ inputValue -> [valueId inputValue]
+    SumRowsNode _ inputValue -> [valueId inputValue]
+    SumColsNode _ inputValue -> [valueId inputValue]
+    MaxRowsNode _ inputValue -> [valueId inputValue]
+    MaxColsNode _ inputValue -> [valueId inputValue]
+    BroadcastRowsNode _ _ inputValue -> [valueId inputValue]
+    BroadcastColsNode _ _ inputValue -> [valueId inputValue]
     AxpyNode _ _ xValue yValue -> [valueId xValue, valueId yValue]
     GemmNode _ matrixSpec -> [valueId (matrixGemmValueA matrixSpec), valueId (matrixGemmValueB matrixSpec), valueId (matrixGemmValueC matrixSpec)]
     FftForwardNode _ inputValue -> [valueId inputValue]
     FftInverseNode _ inputValue -> [valueId inputValue]
     RandUniformNode _ _ -> []
     RandNormalNode _ _ _ _ -> []
+    LoopNode _ loopSpec -> fmap someValueId (loopInitialState loopSpec) <> loopCapturedIds loopSpec
+    LoopResultNode _ loopToken _ -> [loopTokenId loopToken]
 
 toSchedulerNode :: ProgramNode -> SchedulerNode
 toSchedulerNode node =
@@ -620,10 +1008,18 @@ toSchedulerNode node =
           ZipNode _ _ _ _ -> SchedulerResourceJit
           ReduceNode _ _ _ _ -> SchedulerResourceJit
           ReshapeNode _ _ -> SchedulerResourceShape
+          SumRowsNode _ _ -> SchedulerResourceJit
+          SumColsNode _ _ -> SchedulerResourceJit
+          MaxRowsNode _ _ -> SchedulerResourceJit
+          MaxColsNode _ _ -> SchedulerResourceJit
+          BroadcastRowsNode _ _ _ -> SchedulerResourceJit
+          BroadcastColsNode _ _ _ -> SchedulerResourceJit
           AxpyNode _ _ _ _ -> SchedulerResourceBlas
           GemmNode _ _ -> SchedulerResourceBlas
           FftForwardNode _ _ -> SchedulerResourceFft
           FftInverseNode _ _ -> SchedulerResourceFft
           RandUniformNode _ _ -> SchedulerResourceRand
           RandNormalNode _ _ _ _ -> SchedulerResourceRand
+          LoopNode _ _ -> SchedulerResourceRand
+          LoopResultNode _ _ _ -> SchedulerResourceShape
     }

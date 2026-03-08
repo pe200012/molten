@@ -9,12 +9,16 @@ module Molten.Array.Expr
   , Castable(..)
   , Comparable(..)
   , Exp
+  , FloatingExp(..)
+  , FractionalExp(..)
   , NumericExp(..)
   , Unary(..)
   , cast
   , constant
   , evaluateBinaryExpression
   , evaluateUnaryExpression
+  , expE
+  , recipE
   , renderBinaryExpression
   , renderExpression
   , renderUnaryExpression
@@ -41,6 +45,12 @@ class Storable a => ArrayScalar a where
 class ArrayScalar a => NumericExp a where
   addScalar :: a -> a -> a
   mulScalar :: a -> a -> a
+
+class NumericExp a => FractionalExp a where
+  recipScalar :: a -> a
+
+class FractionalExp a => FloatingExp a where
+  expScalar :: a -> a
 
 class ArrayScalar a => Comparable a where
   lessThanScalar :: a -> a -> Bool
@@ -101,9 +111,21 @@ instance NumericExp Float where
   addScalar = (+)
   mulScalar = (*)
 
+instance FractionalExp Float where
+  recipScalar = recip
+
+instance FloatingExp Float where
+  expScalar = exp
+
 instance NumericExp Double where
   addScalar = (+)
   mulScalar = (*)
+
+instance FractionalExp Double where
+  recipScalar = recip
+
+instance FloatingExp Double where
+  expScalar = exp
 
 instance NumericExp Int32 where
   addScalar = (+)
@@ -236,20 +258,22 @@ instance Castable (Complex Double) (Complex Float) where
 data Exp a where
   VarExp :: ArrayScalar a => String -> Exp a
   ConstantExp :: ArrayScalar a => a -> Exp a
-  CastExp :: (ArrayScalar a, ArrayScalar b, Castable a b) => Exp a -> Exp b
+  CastExp :: Castable a b => Exp a -> Exp b
   SelectExp :: ArrayScalar a => Exp Bool -> Exp a -> Exp a -> Exp a
   AddExp :: NumericExp a => Exp a -> Exp a -> Exp a
   MulExp :: NumericExp a => Exp a -> Exp a -> Exp a
+  RecipExp :: FractionalExp a => Exp a -> Exp a
+  ExpExp :: FloatingExp a => Exp a -> Exp a
   LessThanExp :: Comparable a => Exp a -> Exp a -> Exp Bool
 
-newtype Unary a b = Unary { runUnary :: Exp a -> Exp b }
+newtype Unary a b = Unary {runUnary :: Exp a -> Exp b}
 
-newtype Binary a b c = Binary { runBinary :: Exp a -> Exp b -> Exp c }
+newtype Binary a b c = Binary {runBinary :: Exp a -> Exp b -> Exp c}
 
 constant :: ArrayScalar a => a -> Exp a
 constant = ConstantExp
 
-cast :: (ArrayScalar a, ArrayScalar b, Castable a b) => Exp a -> Exp b
+cast :: Castable a b => Exp a -> Exp b
 cast = CastExp
 
 select :: ArrayScalar a => Exp Bool -> Exp a -> Exp a -> Exp a
@@ -270,11 +294,17 @@ binary = Binary
 (.<.) :: Comparable a => Exp a -> Exp a -> Exp Bool
 (.<.) = LessThanExp
 
-evaluateUnaryExpression :: (ArrayScalar a, ArrayScalar b) => Unary a b -> a -> b
+recipE :: FractionalExp a => Exp a -> Exp a
+recipE = RecipExp
+
+expE :: FloatingExp a => Exp a -> Exp a
+expE = ExpExp
+
+evaluateUnaryExpression :: ArrayScalar a => Unary a b -> a -> b
 evaluateUnaryExpression (Unary function) value =
   evaluateExpression (function (ConstantExp value))
 
-evaluateBinaryExpression :: (ArrayScalar a, ArrayScalar b, ArrayScalar c) => Binary a b c -> a -> b -> c
+evaluateBinaryExpression :: (ArrayScalar a, ArrayScalar b) => Binary a b c -> a -> b -> c
 evaluateBinaryExpression (Binary function) leftValue rightValue =
   evaluateExpression (function (ConstantExp leftValue) (ConstantExp rightValue))
 
@@ -290,6 +320,8 @@ evaluateExpression expression =
         else evaluateExpression ifFalse
     AddExp left right -> addScalar (evaluateExpression left) (evaluateExpression right)
     MulExp left right -> mulScalar (evaluateExpression left) (evaluateExpression right)
+    RecipExp inner -> recipScalar (evaluateExpression inner)
+    ExpExp inner -> expScalar (evaluateExpression inner)
     LessThanExp left right -> lessThanScalar (evaluateExpression left) (evaluateExpression right)
 
 renderExpression :: Exp a -> String
@@ -302,12 +334,14 @@ renderExpression expression =
       "(" <> renderExpression predicate <> " ? " <> wrapRenderedExpression ifTrue <> " : " <> wrapRenderedExpression ifFalse <> ")"
     AddExp left right -> renderAddExpression left right
     MulExp left right -> renderMulExpression left right
+    RecipExp inner -> renderRecipExpression inner
+    ExpExp inner -> renderExpExpression inner
     LessThanExp left right -> binaryOperator "<" left right
 
-renderUnaryExpression :: (ArrayScalar a, ArrayScalar b) => Unary a b -> String
+renderUnaryExpression :: ArrayScalar a => Unary a b -> String
 renderUnaryExpression (Unary function) = renderExpression (function (VarExp "x0"))
 
-renderBinaryExpression :: (ArrayScalar a, ArrayScalar b, ArrayScalar c) => Binary a b c -> String
+renderBinaryExpression :: (ArrayScalar a, ArrayScalar b) => Binary a b c -> String
 renderBinaryExpression (Binary function) = renderExpression (function (VarExp "x0") (VarExp "x1"))
 
 wrapRenderedExpression :: Exp a -> String
@@ -326,6 +360,8 @@ expressionTypeCName expression =
     SelectExp _ _ _ -> arrayScalarCType (Proxy :: Proxy a)
     AddExp _ _ -> arrayScalarCType (Proxy :: Proxy a)
     MulExp _ _ -> arrayScalarCType (Proxy :: Proxy a)
+    RecipExp _ -> arrayScalarCType (Proxy :: Proxy a)
+    ExpExp _ -> arrayScalarCType (Proxy :: Proxy a)
     LessThanExp _ _ -> arrayScalarCType (Proxy :: Proxy a)
 
 binaryOperator :: String -> Exp a -> Exp a -> String
@@ -346,9 +382,27 @@ renderMulExpression left right =
     "ComplexDouble" -> renderFunctionCall "molten_mul_double2" left right
     _ -> binaryOperator "*" left right
 
+renderRecipExpression :: forall a. FractionalExp a => Exp a -> String
+renderRecipExpression inner =
+  "((" <> renderUnitLiteral (Proxy :: Proxy a) <> ") / (" <> renderExpression inner <> "))"
+
+renderExpExpression :: forall a. FloatingExp a => Exp a -> String
+renderExpExpression inner =
+  case arrayScalarTypeName (Proxy :: Proxy a) of
+    "Float" -> "expf(" <> renderExpression inner <> ")"
+    "Double" -> "exp(" <> renderExpression inner <> ")"
+    unsupportedType -> error ("renderExpExpression: unsupported scalar type " <> unsupportedType)
+
 renderFunctionCall :: String -> Exp a -> Exp a -> String
 renderFunctionCall functionName left right =
   functionName <> "(" <> renderExpression left <> ", " <> renderExpression right <> ")"
+
+renderUnitLiteral :: forall a proxy. ArrayScalar a => proxy a -> String
+renderUnitLiteral _ =
+  case arrayScalarTypeName (Proxy :: Proxy a) of
+    "Float" -> renderScalarLiteral (1.0 :: Float)
+    "Double" -> renderScalarLiteral (1.0 :: Double)
+    unsupportedType -> error ("renderUnitLiteral: unsupported scalar type " <> unsupportedType)
 
 renderFloatLiteral :: RealFloat a => a -> String
 renderFloatLiteral value =

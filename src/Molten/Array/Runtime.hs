@@ -5,12 +5,24 @@
 module Molten.Array.Runtime
   ( ArrayRuntime
   , arrayRuntimeKernelCount
+  , broadcastColsArray
+  , broadcastColsArrayOn
+  , broadcastRowsArray
+  , broadcastRowsArrayOn
   , fillArray
   , fillArrayOn
   , mapArray
   , mapArrayOn
+  , maxColsArray
+  , maxColsArrayOn
+  , maxRowsArray
+  , maxRowsArrayOn
   , reduceAllArray
   , reduceAllArrayOn
+  , sumColsArray
+  , sumColsArrayOn
+  , sumRowsArray
+  , sumRowsArrayOn
   , withArrayRuntime
   , zipWithArray
   , zipWithArrayOn
@@ -23,16 +35,16 @@ import Data.Map.Strict (Map)
 import Data.Proxy (Proxy(..))
 import Data.Word (Word32, Word64)
 import qualified Data.Massiv.Array as A
-import Foreign.C.Types (CSize)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Marshal.Utils (with)
 import Foreign.Ptr (Ptr, castPtr, nullPtr)
-import Foreign.Storable (Storable, sizeOf)
+import Foreign.Storable (sizeOf)
 import GHC.Stack (HasCallStack)
-import Molten.Array.Device (DeviceArray, deviceArrayBuffer, deviceArraySize, mkDeviceArray, mkDeviceVector)
+import Molten.Array.Device (DeviceArray, deviceArrayBuffer, deviceArraySize, mkDeviceArray, mkDeviceMatrix, mkDeviceVector)
 import Molten.Array.Expr
   ( ArrayScalar(arrayScalarCType)
   , Binary(..)
+  , Comparable
   , NumericExp
   , Unary(..)
   , renderBinaryExpression
@@ -40,9 +52,7 @@ import Molten.Array.Expr
   )
 import Molten.Core.Buffer
   ( Buffer
-  , Location(..)
   , bufferLength
-  , bufferSizeInBytes
   , destroyBuffer
   , newDeviceBufferOn
   , withDevicePtr
@@ -151,6 +161,54 @@ reduceAllArrayOn stream runtime binary initialValue input
   where
     totalLength = A.totalElem (deviceArraySize input)
 
+sumRowsArray :: (HasCallStack, ArrayScalar a, NumericExp a) => ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+sumRowsArray runtime input =
+  sumRowsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime input
+
+sumRowsArrayOn :: forall a. (HasCallStack, ArrayScalar a, NumericExp a) => Stream -> ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+sumRowsArrayOn stream runtime input =
+  reduceAxis2ArrayOn stream runtime AxisRowsReduce AxisReduceSum input
+
+sumColsArray :: (HasCallStack, ArrayScalar a, NumericExp a) => ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+sumColsArray runtime input =
+  sumColsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime input
+
+sumColsArrayOn :: forall a. (HasCallStack, ArrayScalar a, NumericExp a) => Stream -> ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+sumColsArrayOn stream runtime input =
+  reduceAxis2ArrayOn stream runtime AxisColsReduce AxisReduceSum input
+
+maxRowsArray :: (HasCallStack, ArrayScalar a, Comparable a) => ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+maxRowsArray runtime input =
+  maxRowsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime input
+
+maxRowsArrayOn :: forall a. (HasCallStack, ArrayScalar a, Comparable a) => Stream -> ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+maxRowsArrayOn stream runtime input =
+  reduceAxis2ArrayOn stream runtime AxisRowsReduce AxisReduceMax input
+
+maxColsArray :: (HasCallStack, ArrayScalar a, Comparable a) => ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+maxColsArray runtime input =
+  maxColsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime input
+
+maxColsArrayOn :: forall a. (HasCallStack, ArrayScalar a, Comparable a) => Stream -> ArrayRuntime -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+maxColsArrayOn stream runtime input =
+  reduceAxis2ArrayOn stream runtime AxisColsReduce AxisReduceMax input
+
+broadcastRowsArray :: (HasCallStack, ArrayScalar a) => ArrayRuntime -> Int -> DeviceArray A.Ix1 a -> IO (DeviceArray A.Ix2 a)
+broadcastRowsArray runtime cols input =
+  broadcastRowsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime cols input
+
+broadcastRowsArrayOn :: forall a. (HasCallStack, ArrayScalar a) => Stream -> ArrayRuntime -> Int -> DeviceArray A.Ix1 a -> IO (DeviceArray A.Ix2 a)
+broadcastRowsArrayOn stream runtime cols input =
+  broadcastAxis2ArrayOn stream runtime AxisRowsBroadcast cols input
+
+broadcastColsArray :: (HasCallStack, ArrayScalar a) => ArrayRuntime -> Int -> DeviceArray A.Ix1 a -> IO (DeviceArray A.Ix2 a)
+broadcastColsArray runtime rows input =
+  broadcastColsArrayOn (contextDefaultStream (arrayRuntimeContext runtime)) runtime rows input
+
+broadcastColsArrayOn :: forall a. (HasCallStack, ArrayScalar a) => Stream -> ArrayRuntime -> Int -> DeviceArray A.Ix1 a -> IO (DeviceArray A.Ix2 a)
+broadcastColsArrayOn stream runtime rows input =
+  broadcastAxis2ArrayOn stream runtime AxisColsBroadcast rows input
+
 createArrayRuntime :: Context -> IO ArrayRuntime
 createArrayRuntime ctx = do
   kernelCache <- newMVar Map.empty
@@ -166,6 +224,68 @@ destroyArrayRuntime :: HasCallStack => ArrayRuntime -> IO ()
 destroyArrayRuntime runtime = do
   cachedKernels <- Map.elems <$> readMVar (arrayRuntimeKernelCache runtime)
   mapM_ (unloadHipKernel . cachedKernelHandle) cachedKernels
+
+reduceAxis2ArrayOn :: forall a. (HasCallStack, ArrayScalar a) => Stream -> ArrayRuntime -> AxisReduceDirection -> AxisReduceKind -> DeviceArray A.Ix2 a -> IO (DeviceArray A.Ix1 a)
+reduceAxis2ArrayOn stream runtime direction reduceKind input = do
+  let A.Sz2 rows cols = deviceArraySize input
+      outputLength =
+        case direction of
+          AxisRowsReduce -> rows
+          AxisColsReduce -> cols
+  validateAxisReduction direction reduceKind rows cols
+  outputBuffer <- newDeviceBufferOn (streamDeviceId stream) outputLength
+  if outputLength == 0
+    then mkDeviceVector 0 outputBuffer
+    else do
+      cachedKernel <-
+        lookupOrCompileKernel
+          runtime
+          (axisReduceKernelKey (Proxy @a) direction reduceKind)
+          (axisReduceKernelName direction reduceKind)
+          (axisReduceKernelSource (Proxy @a) direction reduceKind)
+      withDevicePtr (deviceArrayBuffer input) $ \inputPtr ->
+        withDevicePtr outputBuffer $ \outputPtr ->
+          launchAxisReduceKernel cachedKernel stream inputPtr outputPtr outputLength rows cols
+      mkDeviceVector outputLength outputBuffer
+
+broadcastAxis2ArrayOn :: forall a. (HasCallStack, ArrayScalar a) => Stream -> ArrayRuntime -> AxisBroadcastDirection -> Int -> DeviceArray A.Ix1 a -> IO (DeviceArray A.Ix2 a)
+broadcastAxis2ArrayOn stream runtime direction repeatedExtent input = do
+  if repeatedExtent < 0
+    then throwArgumentError "broadcastAxis2ArrayOn" "broadcast extent must be non-negative"
+    else pure ()
+  let A.Sz1 baseLength = deviceArraySize input
+      (rows, cols) =
+        case direction of
+          AxisRowsBroadcast -> (baseLength, repeatedExtent)
+          AxisColsBroadcast -> (repeatedExtent, baseLength)
+      outputLength = rows * cols
+  outputBuffer <- newDeviceBufferOn (streamDeviceId stream) outputLength
+  if outputLength == 0
+    then mkDeviceMatrix rows cols outputBuffer
+    else do
+      cachedKernel <-
+        lookupOrCompileKernel
+          runtime
+          (axisBroadcastKernelKey (Proxy @a) direction)
+          (axisBroadcastKernelName direction)
+          (axisBroadcastKernelSource (Proxy @a) direction)
+      withDevicePtr (deviceArrayBuffer input) $ \inputPtr ->
+        withDevicePtr outputBuffer $ \outputPtr ->
+          launchAxisBroadcastKernel cachedKernel stream inputPtr outputPtr outputLength rows cols
+      mkDeviceMatrix rows cols outputBuffer
+
+validateAxisReduction :: HasCallStack => AxisReduceDirection -> AxisReduceKind -> Int -> Int -> IO ()
+validateAxisReduction direction reduceKind rows cols =
+  case (direction, reduceKind, rows, cols) of
+    (_, _, negativeRows, _) | negativeRows < 0 ->
+      throwArgumentError "reduceAxis2ArrayOn" "row count must be non-negative"
+    (_, _, _, negativeCols) | negativeCols < 0 ->
+      throwArgumentError "reduceAxis2ArrayOn" "column count must be non-negative"
+    (AxisRowsReduce, _, positiveRows, 0) | positiveRows > 0 ->
+      throwArgumentError "reduceAxis2ArrayOn" "row reduction requires at least one column"
+    (AxisColsReduce, _, 0, positiveCols) | positiveCols > 0 ->
+      throwArgumentError "reduceAxis2ArrayOn" "column reduction requires at least one row"
+    _ -> pure ()
 
 lookupOrCompileKernel :: HasCallStack => ArrayRuntime -> String -> String -> String -> IO CachedKernel
 lookupOrCompileKernel runtime kernelKey kernelName kernelSource =
@@ -224,6 +344,24 @@ launchZipKernel cachedKernel stream (DevicePtr leftPtr) (DevicePtr rightPtr) (De
           withArray [castPtr pLeft, castPtr pRight, castPtr pOutput, castPtr pLength] $ \kernelParams ->
             launch1dKernel (cachedKernelHandle cachedKernel) stream elementCount 0 kernelParams
 
+launchAxisReduceKernel :: HasCallStack => CachedKernel -> Stream -> DevicePtr a -> DevicePtr a -> Int -> Int -> Int -> IO ()
+launchAxisReduceKernel cachedKernel stream (DevicePtr inputPtr) (DevicePtr outputPtr) outputLength rows cols =
+  with inputPtr $ \pInput ->
+    with outputPtr $ \pOutput ->
+      with (fromIntegral rows :: Word64) $ \pRows ->
+        with (fromIntegral cols :: Word64) $ \pCols ->
+          withArray [castPtr pInput, castPtr pOutput, castPtr pRows, castPtr pCols] $ \kernelParams ->
+            launch1dKernel (cachedKernelHandle cachedKernel) stream outputLength 0 kernelParams
+
+launchAxisBroadcastKernel :: HasCallStack => CachedKernel -> Stream -> DevicePtr a -> DevicePtr a -> Int -> Int -> Int -> IO ()
+launchAxisBroadcastKernel cachedKernel stream (DevicePtr inputPtr) (DevicePtr outputPtr) outputLength rows cols =
+  with inputPtr $ \pInput ->
+    with outputPtr $ \pOutput ->
+      with (fromIntegral rows :: Word64) $ \pRows ->
+        with (fromIntegral cols :: Word64) $ \pCols ->
+          withArray [castPtr pInput, castPtr pOutput, castPtr pRows, castPtr pCols] $ \kernelParams ->
+            launch1dKernel (cachedKernelHandle cachedKernel) stream outputLength 0 kernelParams
+
 launchReduceKernel :: forall a. (HasCallStack, ArrayScalar a) => CachedKernel -> Stream -> DevicePtr a -> DevicePtr a -> Int -> IO ()
 launchReduceKernel cachedKernel stream (DevicePtr inputPtr) (DevicePtr outputPtr) elementCount =
   with inputPtr $ \pInput ->
@@ -275,6 +413,21 @@ launchReductionKernel loadedKernel stream elementCount sharedBytes kernelParams 
 runtimeBlockSize :: Int
 runtimeBlockSize = 256
 
+data AxisReduceDirection
+  = AxisRowsReduce
+  | AxisColsReduce
+  deriving (Eq, Show)
+
+data AxisBroadcastDirection
+  = AxisRowsBroadcast
+  | AxisColsBroadcast
+  deriving (Eq, Show)
+
+data AxisReduceKind
+  = AxisReduceSum
+  | AxisReduceMax
+  deriving (Eq, Show)
+
 fillKernelName :: String
 fillKernelName = "molten_fill"
 
@@ -289,6 +442,20 @@ reduceKernelName = "molten_reduce_step"
 
 reduceCombineKernelName :: String
 reduceCombineKernelName = "molten_reduce_combine"
+
+axisReduceKernelName :: AxisReduceDirection -> AxisReduceKind -> String
+axisReduceKernelName direction reduceKind =
+  case (direction, reduceKind) of
+    (AxisRowsReduce, AxisReduceSum) -> "molten_sum_rows"
+    (AxisColsReduce, AxisReduceSum) -> "molten_sum_cols"
+    (AxisRowsReduce, AxisReduceMax) -> "molten_max_rows"
+    (AxisColsReduce, AxisReduceMax) -> "molten_max_cols"
+
+axisBroadcastKernelName :: AxisBroadcastDirection -> String
+axisBroadcastKernelName direction =
+  case direction of
+    AxisRowsBroadcast -> "molten_broadcast_rows"
+    AxisColsBroadcast -> "molten_broadcast_cols"
 
 fillKernelKey :: forall a. ArrayScalar a => a -> String
 fillKernelKey _ = "fill:" <> arrayScalarCType (Proxy :: Proxy a)
@@ -326,6 +493,23 @@ reduceCombineKernelKey binary =
     [ "reduce-combine"
     , arrayScalarCType (Proxy @a)
     , renderBinaryExpression binary
+    ]
+
+axisReduceKernelKey :: forall a. ArrayScalar a => Proxy a -> AxisReduceDirection -> AxisReduceKind -> String
+axisReduceKernelKey _ direction reduceKind =
+  unwords
+    [ "axis-reduce"
+    , show direction
+    , show reduceKind
+    , arrayScalarCType (Proxy @a)
+    ]
+
+axisBroadcastKernelKey :: forall a. ArrayScalar a => Proxy a -> AxisBroadcastDirection -> String
+axisBroadcastKernelKey _ direction =
+  unwords
+    [ "axis-broadcast"
+    , show direction
+    , arrayScalarCType (Proxy @a)
     ]
 
 kernelSupportSource :: String
@@ -450,6 +634,85 @@ reduceCombineKernelSource _ binary =
     ]
   where
     scalarType = arrayScalarCType (Proxy :: Proxy a)
+
+axisReduceKernelSource :: forall a. ArrayScalar a => Proxy a -> AxisReduceDirection -> AxisReduceKind -> String
+axisReduceKernelSource _ direction reduceKind =
+  kernelSupportSource
+    <> unlines
+      [ axisReduceCombineSource reduceKind scalarType
+      , "extern \"C\" __global__ void " <> axisReduceKernelName direction reduceKind <> "(const " <> scalarType <> "* input, " <> scalarType <> "* output, unsigned long long rows, unsigned long long cols) {"
+      , "  unsigned long long outIdx = blockIdx.x * blockDim.x + threadIdx.x;"
+      , "  unsigned long long outputLength = " <> outputLengthExpression direction <> ";"
+      , "  if (outIdx < outputLength) {"
+      , axisReduceInitialization direction scalarType
+      , axisReduceLoop direction reduceKind
+      , "    output[outIdx] = acc;"
+      , "  }"
+      , "}"
+      ]
+  where
+    scalarType = arrayScalarCType (Proxy :: Proxy a)
+
+axisBroadcastKernelSource :: forall a. ArrayScalar a => Proxy a -> AxisBroadcastDirection -> String
+axisBroadcastKernelSource _ direction =
+  kernelSupportSource
+    <> unlines
+      [ "extern \"C\" __global__ void " <> axisBroadcastKernelName direction <> "(const " <> scalarType <> "* input, " <> scalarType <> "* output, unsigned long long rows, unsigned long long cols) {"
+      , "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;"
+      , "  unsigned long long total = rows * cols;"
+      , "  if (idx < total) {"
+      , axisBroadcastIndexSource direction
+      , "  }"
+      , "}"
+      ]
+  where
+    scalarType = arrayScalarCType (Proxy :: Proxy a)
+
+axisReduceCombineSource :: AxisReduceKind -> String -> String
+axisReduceCombineSource reduceKind scalarType =
+  case reduceKind of
+    AxisReduceSum ->
+      "__device__ inline " <> scalarType <> " molten_axis_reduce_combine(" <> scalarType <> " left, " <> scalarType <> " right) { return left + right; }"
+    AxisReduceMax ->
+      "__device__ inline " <> scalarType <> " molten_axis_reduce_combine(" <> scalarType <> " left, " <> scalarType <> " right) { return left < right ? right : left; }"
+
+outputLengthExpression :: AxisReduceDirection -> String
+outputLengthExpression direction =
+  case direction of
+    AxisRowsReduce -> "rows"
+    AxisColsReduce -> "cols"
+
+axisReduceInitialization :: AxisReduceDirection -> String -> String
+axisReduceInitialization direction scalarType =
+  case direction of
+    AxisRowsReduce ->
+      "    unsigned long long base = outIdx * cols;\n    " <> scalarType <> " acc = input[base];"
+    AxisColsReduce ->
+      "    " <> scalarType <> " acc = input[outIdx];"
+
+axisReduceLoop :: AxisReduceDirection -> AxisReduceKind -> String
+axisReduceLoop direction reduceKind =
+  case (direction, reduceKind) of
+    (AxisRowsReduce, _) ->
+      unlines
+        [ "    for (unsigned long long col = 1ULL; col < cols; ++col) {"
+        , "      acc = molten_axis_reduce_combine(acc, input[base + col]);"
+        , "    }"
+        ]
+    (AxisColsReduce, _) ->
+      unlines
+        [ "    for (unsigned long long row = 1ULL; row < rows; ++row) {"
+        , "      acc = molten_axis_reduce_combine(acc, input[row * cols + outIdx]);"
+        , "    }"
+        ]
+
+axisBroadcastIndexSource :: AxisBroadcastDirection -> String
+axisBroadcastIndexSource direction =
+  case direction of
+    AxisRowsBroadcast ->
+      "    unsigned long long row = cols == 0ULL ? 0ULL : (idx / cols);\n    output[idx] = input[row];"
+    AxisColsBroadcast ->
+      "    unsigned long long col = cols == 0ULL ? 0ULL : (idx % cols);\n    output[idx] = input[col];"
 
 ceilDiv :: Int -> Int -> Int
 ceilDiv numerator denominator =

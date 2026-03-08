@@ -28,6 +28,8 @@ extra-source-files:
     docs/plans/2026-03-08-molten-cpu-reference-evaluator-implementation.md
     docs/plans/2026-03-08-molten-example-suite-design.md
     docs/plans/2026-03-08-molten-example-suite-implementation.md
+    docs/plans/2026-03-08-molten-softmax-loop-examples-design.md
+    docs/plans/2026-03-08-molten-softmax-loop-examples-implementation.md
 
 source-repository head
   type: git
@@ -36,6 +38,7 @@ source-repository head
 library
   exposed-modules:
       Molten
+      Molten.Array.Axis2D
       Molten.Array.Device
       Molten.Array.Expr
       Molten.Array.Program
@@ -50,6 +53,8 @@ library
       Molten.Core.Future
       Molten.Core.Stream
       Molten.Core.Transfer
+      Molten.Examples.Attention
+      Molten.Examples.BlackScholesAsian
       Molten.Examples.Common
       Molten.Examples.Heat2dFft
       Molten.Examples.MlpForward
@@ -68,6 +73,7 @@ library
       Molten.Core.Types
       Molten.Internal.Device
       Molten.Internal.Reference.Array
+      Molten.Internal.Reference.Axis2D
       Molten.Internal.Reference.BLAS
       Molten.Internal.Reference.Program
       Molten.Internal.Validation
@@ -90,6 +96,70 @@ library
     , bytestring
     , containers
     , massiv
+    , mtl
+    , rocm-ffi-core
+    , rocm-hip-runtime
+    , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
+    , vector
+  default-language: Haskell2010
+
+executable molten-example-attention-forward
+  main-is: Main.hs
+  other-modules:
+      Paths_molten
+  autogen-modules:
+      Paths_molten
+  hs-source-dirs:
+      app/attention-forward
+  default-extensions:
+      GADTs
+      DataKinds
+      KindSignatures
+      RankNTypes
+      ScopedTypeVariables
+      TypeApplications
+      TypeFamilies
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , molten
+    , mtl
+    , rocm-ffi-core
+    , rocm-hip-runtime
+    , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
+    , vector
+  default-language: Haskell2010
+
+executable molten-example-black-scholes-asian
+  main-is: Main.hs
+  other-modules:
+      Paths_molten
+  autogen-modules:
+      Paths_molten
+  hs-source-dirs:
+      app/black-scholes-asian
+  default-extensions:
+      GADTs
+      DataKinds
+      KindSignatures
+      RankNTypes
+      ScopedTypeVariables
+      TypeApplications
+      TypeFamilies
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , molten
     , mtl
     , rocm-ffi-core
     , rocm-hip-runtime
@@ -231,6 +301,7 @@ test-suite molten-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Molten.Array.Axis2DSpec
       Molten.Array.DeviceSpec
       Molten.Array.ExprSpec
       Molten.Array.ProgramGpuSpec
@@ -244,6 +315,8 @@ test-suite molten-test
       Molten.Core.ContextSpec
       Molten.Core.GemmSpec
       Molten.Core.TransferSpec
+      Molten.Examples.AttentionSpec
+      Molten.Examples.BlackScholesAsianSpec
       Molten.Examples.CommonSpec
       Molten.Examples.Heat2dFftSpec
       Molten.Examples.MlpForwardSpec
@@ -255,6 +328,7 @@ test-suite molten-test
       Molten.RAND.GpuSpec
       Molten.RAND.RuntimeSpec
       Molten.Reference.ArraySpec
+      Molten.Reference.Axis2DSpec
       Molten.Reference.BlasSpec
       Molten.Reference.ProgramSpec
       Molten.TestSupport

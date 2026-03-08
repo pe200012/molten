@@ -16,6 +16,7 @@ import Molten.Array.Program
   , fftForwardP
   , fftInverseP
   , fillArrayP
+  , forLoopP
   , gemmMatrixP
   , inputArray
   , inputDeviceArray
@@ -23,6 +24,7 @@ import Molten.Array.Program
   , randUniformP
   , reduceAll
   , runProgram
+  , softmaxRowsP
   , withProgramRuntime
   , zipWithExpr
   )
@@ -116,6 +118,47 @@ spec = do
           gpuHost <- readDeviceArrayToHostArray ctx gpuResult
           AM.toStorableVector gpuHost `shouldBe` AM.toStorableVector cpuResult
 
+    it "matches CPU reference for inputArray -> softmaxRowsP" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let input = (AMV.fromVector' A.Seq (A.Sz2 2 3) (VS.fromList [1, 2, 3, 0, -1, 1 :: Float])) :: A.Array A.S A.Ix2 Float
+          program <-
+            buildProgram $ do
+              value0 <- inputArray input
+              softmaxRowsP value0
+          cpuResult <- runProgramCpu program
+          gpuResult <- runProgram runtime program
+          gpuHost <- readDeviceArrayToHostArray ctx gpuResult
+          approxFloatArray cpuResult gpuHost `shouldBe` True
+
+    it "matches CPU reference for inputArray -> forLoopP map recurrence" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let input = (AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [1, 2, 3, 4 :: Int32])) :: A.Array A.S A.Ix1 Int32
+          program <-
+            buildProgram $ do
+              value0 <- inputArray input
+              forLoopP 3 value0 (mapExpr (Unary (\x -> x .+. constant 1)))
+          cpuResult <- runProgramCpu program
+          gpuResult <- runProgram runtime program
+          gpuHost <- readDeviceArrayToHostArray ctx gpuResult
+          AM.toStorableVector gpuHost `shouldBe` AM.toStorableVector cpuResult
+
+    it "matches CPU reference for forLoopP with outer invariant values" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let input = (AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [1, 2, 3, 4 :: Int32])) :: A.Array A.S A.Ix1 Int32
+              bias = (AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [10, 10, 10, 10 :: Int32])) :: A.Array A.S A.Ix1 Int32
+          program <-
+            buildProgram $ do
+              state0 <- inputArray input
+              bias0 <- inputArray bias
+              forLoopP 2 state0 (\stateValue -> zipWithExpr (Binary (\x y -> x .+. y)) stateValue bias0)
+          cpuResult <- runProgramCpu program
+          gpuResult <- runProgram runtime program
+          gpuHost <- readDeviceArrayToHostArray ctx gpuResult
+          AM.toStorableVector gpuHost `shouldBe` AM.toStorableVector cpuResult
+
   describe "BLAS / FFT / RAND nodes" $ do
     it "runs randUniformP -> mapExpr -> gemmMatrixP in one program" $
       withGpuContext $ \ctx ->
@@ -176,3 +219,10 @@ approxComplex :: Complex Float -> Complex Float -> Bool
 approxComplex (expectedReal :+ expectedImag) (actualReal :+ actualImag) =
   abs (expectedReal - actualReal) <= 1.0e-2
     && abs (expectedImag - actualImag) <= 1.0e-2
+
+approxFloatArray :: A.Array A.S A.Ix2 Float -> A.Array A.S A.Ix2 Float -> Bool
+approxFloatArray expected actual =
+  let expectedValues = AM.toStorableVector expected
+      actualValues = AM.toStorableVector actual
+   in VS.length expectedValues == VS.length actualValues
+        && VS.and (VS.zipWith (\x y -> abs (x - y) <= 1.0e-5) expectedValues actualValues)

@@ -12,13 +12,18 @@ import qualified Data.Vector.Storable as VS
 import Molten.Array.Expr (Binary(..), Unary(..), constant, (.+.), (.*.))
 import Molten.Array.Program
   ( MatrixGemmValue(..)
+  , broadcastRowsP
   , buildProgram
+  , forLoopP
   , fillArrayP
   , gemmMatrixP
   , inputArray
   , inputDeviceArray
   , mapExpr
   , reduceAll
+  , softmaxRowsP
+  , sumRowsP
+  , zipWithExpr
   )
 import Molten.Array.Transfer (copyHostArrayToDevice)
 import Molten.BLAS.Types (Transpose(..))
@@ -70,6 +75,49 @@ spec = do
               }
       resultArray <- runProgramCpu program
       AM.toStorableVector resultArray `shouldBe` VS.fromList [19, 22, 43, 50 :: Float]
+
+    it "runs sumRowsP -> broadcastRowsP on CPU" $ do
+      let input = AMV.fromVector' A.Seq (A.Sz2 2 3) (VS.fromList [1, 2, 3, 4, 5, 6 :: Int32])
+      program <-
+        buildProgram $ do
+          value0 <- inputArray input
+          rowSums <- sumRowsP value0
+          broadcastRowsP 3 rowSums
+      resultArray <- runProgramCpu program
+      AM.toStorableVector resultArray `shouldBe` VS.fromList [6, 6, 6, 15, 15, 15 :: Int32]
+
+    it "runs softmaxRowsP on CPU" $ do
+      let input = AMV.fromVector' A.Seq (A.Sz2 1 3) (VS.fromList [0, 0, 0 :: Float])
+      program <-
+        buildProgram $ do
+          value0 <- inputArray input
+          softmaxRowsP value0
+      resultArray <- runProgramCpu program
+      AM.toStorableVector resultArray `shouldBe` VS.fromList [1 / 3, 1 / 3, 1 / 3 :: Float]
+
+    it "runs forLoopP with zero iterations on CPU" $ do
+      let input = AMV.fromVector' A.Seq (A.Sz1 3) (VS.fromList [1, 2, 3 :: Int32])
+      program <-
+        buildProgram $ do
+          value0 <- inputArray input
+          forLoopP 0 value0 (mapExpr (Unary (\x -> x .+. constant 1)))
+      resultArray <- runProgramCpu program
+      AM.toStorableVector resultArray `shouldBe` VS.fromList [1, 2, 3 :: Int32]
+
+    it "runs forLoopP with tuple state on CPU" $ do
+      let left0 = AMV.fromVector' A.Seq (A.Sz1 2) (VS.fromList [1, 1 :: Int32])
+          right0 = AMV.fromVector' A.Seq (A.Sz1 2) (VS.fromList [0, 0 :: Int32])
+      program <-
+        buildProgram $ do
+          leftValue <- inputArray left0
+          rightValue <- inputArray right0
+          forLoopP 2 (leftValue, rightValue) $ \(leftState, rightState) -> do
+            leftNext <- mapExpr (Unary (\x -> x .+. constant 1)) leftState
+            rightNext <- zipWithExpr (Binary (\x y -> x .+. y)) leftState rightState
+            pure (leftNext, rightNext)
+      (leftResult, rightResult) <- runProgramCpu program
+      AM.toStorableVector leftResult `shouldBe` VS.fromList [3, 3 :: Int32]
+      AM.toStorableVector rightResult `shouldBe` VS.fromList [3, 3 :: Int32]
 
     it "rejects device-only inputs" $
       withGpuContext $ \ctx -> do
