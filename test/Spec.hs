@@ -14,6 +14,10 @@ import qualified Molten.Core.BufferSpec as BufferSpec
 import qualified Molten.Core.ContextSpec as ContextSpec
 import qualified Molten.Core.GemmSpec as GemmSpec
 import qualified Molten.Core.TransferSpec as TransferSpec
+import qualified Molten.Examples.CommonSpec as ExampleCommonSpec
+import qualified Molten.Examples.Heat2dFftSpec as Heat2dFftSpec
+import qualified Molten.Examples.MlpForwardSpec as MlpForwardSpec
+import qualified Molten.Examples.MonteCarloBachelierSpec as MonteCarloBachelierSpec
 import qualified Molten.FFT.GpuSpec as FftGpuSpec
 import qualified Molten.FFT.RuntimeSpec as FftRuntimeSpec
 import qualified Molten.Interop.MassivGpuSpec as MassivGpuSpec
@@ -42,6 +46,10 @@ spec = do
   describe "Molten.Array.Runtime" RuntimeSpec.spec
   describe "Molten.Array.Transfer" ArrayTransferSpec.spec
   describe "Molten.BLAS.Array" ArrayBlasSpec.spec
+  describe "Molten.Examples.Common" ExampleCommonSpec.spec
+  describe "Molten.Examples.MlpForward" MlpForwardSpec.spec
+  describe "Molten.Examples.Heat2dFft" Heat2dFftSpec.spec
+  describe "Molten.Examples.MonteCarloBachelier" MonteCarloBachelierSpec.spec
   describe "Molten.FFT.Runtime" FftRuntimeSpec.spec
   describe "Molten.FFT.GPU" FftGpuSpec.spec
   describe "Molten.Interop.Massiv" MassivSpec.spec

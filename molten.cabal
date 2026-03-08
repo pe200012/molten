@@ -26,6 +26,8 @@ extra-source-files:
     docs/plans/2026-03-08-molten-array-program-runtime-implementation.md
     docs/plans/2026-03-08-molten-cpu-reference-evaluator-design.md
     docs/plans/2026-03-08-molten-cpu-reference-evaluator-implementation.md
+    docs/plans/2026-03-08-molten-example-suite-design.md
+    docs/plans/2026-03-08-molten-example-suite-implementation.md
 
 source-repository head
   type: git
@@ -48,6 +50,10 @@ library
       Molten.Core.Future
       Molten.Core.Stream
       Molten.Core.Transfer
+      Molten.Examples.Common
+      Molten.Examples.Heat2dFft
+      Molten.Examples.MlpForward
+      Molten.Examples.MonteCarloBachelier
       Molten.FFT
       Molten.FFT.Runtime
       Molten.Internal.HIPRTC
@@ -84,6 +90,102 @@ library
     , bytestring
     , containers
     , massiv
+    , mtl
+    , rocm-ffi-core
+    , rocm-hip-runtime
+    , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
+    , vector
+  default-language: Haskell2010
+
+executable molten-example-heat2d-fft
+  main-is: Main.hs
+  other-modules:
+      Paths_molten
+  autogen-modules:
+      Paths_molten
+  hs-source-dirs:
+      app/heat2d-fft
+  default-extensions:
+      GADTs
+      DataKinds
+      KindSignatures
+      RankNTypes
+      ScopedTypeVariables
+      TypeApplications
+      TypeFamilies
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , molten
+    , mtl
+    , rocm-ffi-core
+    , rocm-hip-runtime
+    , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
+    , vector
+  default-language: Haskell2010
+
+executable molten-example-mlp-forward
+  main-is: Main.hs
+  other-modules:
+      Paths_molten
+  autogen-modules:
+      Paths_molten
+  hs-source-dirs:
+      app/mlp-forward
+  default-extensions:
+      GADTs
+      DataKinds
+      KindSignatures
+      RankNTypes
+      ScopedTypeVariables
+      TypeApplications
+      TypeFamilies
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , molten
+    , mtl
+    , rocm-ffi-core
+    , rocm-hip-runtime
+    , rocm-rocblas
+    , rocm-rocfft
+    , rocm-rocrand
+    , vector
+  default-language: Haskell2010
+
+executable molten-example-monte-carlo-bachelier
+  main-is: Main.hs
+  other-modules:
+      Paths_molten
+  autogen-modules:
+      Paths_molten
+  hs-source-dirs:
+      app/monte-carlo-bachelier
+  default-extensions:
+      GADTs
+      DataKinds
+      KindSignatures
+      RankNTypes
+      ScopedTypeVariables
+      TypeApplications
+      TypeFamilies
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.18 && <5
+    , bytestring
+    , containers
+    , massiv
+    , molten
     , mtl
     , rocm-ffi-core
     , rocm-hip-runtime
@@ -142,6 +244,10 @@ test-suite molten-test
       Molten.Core.ContextSpec
       Molten.Core.GemmSpec
       Molten.Core.TransferSpec
+      Molten.Examples.CommonSpec
+      Molten.Examples.Heat2dFftSpec
+      Molten.Examples.MlpForwardSpec
+      Molten.Examples.MonteCarloBachelierSpec
       Molten.FFT.GpuSpec
       Molten.FFT.RuntimeSpec
       Molten.Interop.MassivGpuSpec

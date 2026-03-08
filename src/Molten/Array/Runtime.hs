@@ -328,10 +328,28 @@ reduceCombineKernelKey binary =
     , renderBinaryExpression binary
     ]
 
+kernelSupportSource :: String
+kernelSupportSource =
+  unlines
+    [ "__device__ inline float2 molten_add_float2(float2 left, float2 right) {"
+    , "  return make_float2(left.x + right.x, left.y + right.y);"
+    , "}"
+    , "__device__ inline float2 molten_mul_float2(float2 left, float2 right) {"
+    , "  return make_float2(left.x * right.x - left.y * right.y, left.x * right.y + left.y * right.x);"
+    , "}"
+    , "__device__ inline double2 molten_add_double2(double2 left, double2 right) {"
+    , "  return make_double2(left.x + right.x, left.y + right.y);"
+    , "}"
+    , "__device__ inline double2 molten_mul_double2(double2 left, double2 right) {"
+    , "  return make_double2(left.x * right.x - left.y * right.y, left.x * right.y + left.y * right.x);"
+    , "}"
+    ]
+
 fillKernelSource :: forall a. ArrayScalar a => Proxy a -> String
 fillKernelSource _ =
-  unlines
-    [ "extern \"C\" __global__ void " <> fillKernelName <> "(" <> scalarType <> "* output, unsigned long long n, " <> scalarType <> " value) {"
+  kernelSupportSource
+    <> unlines
+      [ "extern \"C\" __global__ void " <> fillKernelName <> "(" <> scalarType <> "* output, unsigned long long n, " <> scalarType <> " value) {"
     , "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;"
     , "  if (idx < n) {"
     , "    output[idx] = value;"
@@ -343,8 +361,9 @@ fillKernelSource _ =
 
 mapKernelSource :: forall a b. (ArrayScalar a, ArrayScalar b) => Proxy a -> Proxy b -> Unary a b -> String
 mapKernelSource _ _ unary =
-  unlines
-    [ "extern \"C\" __global__ void " <> mapKernelName <> "(const " <> inputType <> "* input, " <> outputType <> "* output, unsigned long long n) {"
+  kernelSupportSource
+    <> unlines
+      [ "extern \"C\" __global__ void " <> mapKernelName <> "(const " <> inputType <> "* input, " <> outputType <> "* output, unsigned long long n) {"
     , "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;"
     , "  if (idx < n) {"
     , "    " <> inputType <> " x0 = input[idx];"
@@ -358,8 +377,9 @@ mapKernelSource _ _ unary =
 
 zipKernelSource :: forall a b c. (ArrayScalar a, ArrayScalar b, ArrayScalar c) => Proxy a -> Proxy b -> Proxy c -> Binary a b c -> String
 zipKernelSource _ _ _ binary =
-  unlines
-    [ "extern \"C\" __global__ void " <> zipKernelName <> "(const " <> leftType <> "* left, const " <> rightType <> "* right, " <> outputType <> "* output, unsigned long long n) {"
+  kernelSupportSource
+    <> unlines
+      [ "extern \"C\" __global__ void " <> zipKernelName <> "(const " <> leftType <> "* left, const " <> rightType <> "* right, " <> outputType <> "* output, unsigned long long n) {"
     , "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;"
     , "  if (idx < n) {"
     , "    " <> leftType <> " x0 = left[idx];"
@@ -375,8 +395,9 @@ zipKernelSource _ _ _ binary =
 
 reduceKernelSource :: forall a. ArrayScalar a => Proxy a -> Binary a a a -> String
 reduceKernelSource _ binary =
-  unlines
-    [ "__device__ inline " <> scalarType <> " molten_reduce_op(" <> scalarType <> " x0, " <> scalarType <> " x1) {"
+  kernelSupportSource
+    <> unlines
+      [ "__device__ inline " <> scalarType <> " molten_reduce_op(" <> scalarType <> " x0, " <> scalarType <> " x1) {"
     , "  return " <> renderBinaryExpression binary <> ";"
     , "}"
     , "extern \"C\" __global__ void " <> reduceKernelName <> "(const " <> scalarType <> "* input, " <> scalarType <> "* output, unsigned long long n) {"
@@ -417,8 +438,9 @@ reduceKernelSource _ binary =
 
 reduceCombineKernelSource :: forall a. ArrayScalar a => Proxy a -> Binary a a a -> String
 reduceCombineKernelSource _ binary =
-  unlines
-    [ "extern \"C\" __global__ void " <> reduceCombineKernelName <> "(" <> scalarType <> " initialValue, const " <> scalarType <> "* reduced, " <> scalarType <> "* output) {"
+  kernelSupportSource
+    <> unlines
+      [ "extern \"C\" __global__ void " <> reduceCombineKernelName <> "(" <> scalarType <> " initialValue, const " <> scalarType <> "* reduced, " <> scalarType <> "* output) {"
     , "  if (blockIdx.x == 0 && threadIdx.x == 0) {"
     , "    " <> scalarType <> " x0 = initialValue;"
     , "    " <> scalarType <> " x1 = reduced[0];"

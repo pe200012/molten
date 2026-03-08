@@ -5,6 +5,7 @@ module Molten.Array.RuntimeSpec (spec) where
 
 import Control.Exception (SomeException, displayException, try)
 import qualified Data.ByteString
+import Data.Complex (Complex((:+)))
 import Data.Int (Int32)
 import Data.List (isInfixOf)
 import qualified Data.Massiv.Array as A
@@ -109,6 +110,15 @@ spec = do
           output <- reduceAllArray runtime (Binary (\x y -> x .+. y)) 0 mapped
           hostArray <- readDeviceArrayToHostArray ctx output
           AM.toStorableVector hostArray `shouldBe` VS.fromList [5 :: Float]
+
+    it "zips complex arrays with pointwise multiplication on the GPU" $
+      withGpuContext $ \ctx ->
+        withArrayRuntime ctx $ \runtime -> do
+          left <- copyHostArrayToDevice ctx (vector1 [1 :+ 2, 3 :+ 4 :: Complex Float])
+          right <- copyHostArrayToDevice ctx (vector1 [5 :+ 6, 7 :+ 8 :: Complex Float])
+          output <- zipWithArray runtime (Binary (\x y -> x .*. y)) left right
+          hostArray <- readDeviceArrayToHostArray ctx output
+          AM.toStorableVector hostArray `shouldBe` VS.fromList [(-7) :+ 16, (-11) :+ 52 :: Complex Float]
 
 vector1 :: Storable a => [a] -> A.Array A.S A.Ix1 a
 vector1 values =

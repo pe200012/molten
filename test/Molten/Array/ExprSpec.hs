@@ -2,19 +2,23 @@
 
 module Molten.Array.ExprSpec (spec) where
 
-import Data.Complex (Complex)
+import Data.Complex (Complex((:+)))
 import Data.Int (Int32)
 import Data.Proxy (Proxy(..))
 import Data.Word (Word32)
 import Molten.Array.Expr
   ( ArrayScalar(arrayScalarCType, arrayScalarTypeName)
+  , Binary(..)
   , Exp
   , Unary(..)
+  , evaluateBinaryExpression
   , cast
   , constant
+  , renderBinaryExpression
   , renderUnaryExpression
   , select
   , (.+.)
+  , (.*.)
   , (.<.)
   )
 import Test.Hspec (Spec, describe, it, shouldBe)
@@ -31,6 +35,18 @@ spec = do
       let expression :: Unary Int32 Float
           expression = Unary (\x -> cast x :: Exp Float)
       renderUnaryExpression expression `shouldBe` "((float)(x0))"
+
+  describe "renderBinaryExpression" $ do
+    it "renders complex arithmetic via helper functions instead of raw float2 operators" $ do
+      let expression :: Binary (Complex Float) (Complex Float) (Complex Float)
+          expression = Binary (\x y -> x .*. y .+. x)
+      renderBinaryExpression expression `shouldBe` "molten_add_float2(molten_mul_float2(x0, x1), x0)"
+
+  describe "evaluateBinaryExpression" $ do
+    it "evaluates complex add and multiply on the CPU reference path" $ do
+      let expression :: Binary (Complex Float) (Complex Float) (Complex Float)
+          expression = Binary (\x y -> x .*. y .+. x)
+      evaluateBinaryExpression expression (1 :+ 2) (3 :+ 4) `shouldBe` ((-4) :+ 12)
 
   describe "ArrayScalar metadata" $ do
     it "exposes scalar names and HIP C type names for the supported surface types" $ do

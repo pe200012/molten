@@ -81,6 +81,58 @@ HSA_OVERRIDE_GFX_VERSION=11.0.0 stack test
 HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run
 ```
 
+## Examples
+
+仓库现在提供三个默认就会跑 **stress workload + self-check** 的 example executables：
+
+### 1. `molten-example-mlp-forward`
+
+覆盖：`Program`、shape-aware BLAS、JIT elementwise、CPU-vs-GPU shadow check。
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-mlp-forward
+```
+
+可选参数：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-mlp-forward -- --batch 4096 --in 1024 --hidden 2048 --out 512
+```
+
+默认先跑一个小 shadow case 做 CPU-vs-GPU 对照，再跑大规模 GPU stress case。若 shadow check 或 stress summary 失败，程序会直接退出失败。
+
+### 2. `molten-example-heat2d-fft`
+
+覆盖：`FftRuntime`、复数 pointwise JIT kernel、二维 FFT repeated execution。
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-heat2d-fft
+```
+
+可选参数：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-heat2d-fft -- --nx 1024 --ny 1024 --steps 100 --alpha 0.05 --dt 1e-3
+```
+
+默认会检查两次重复运行的稳定性，以及热扩散 stepper 的能量不增长条件。失败时直接退出失败。
+
+### 3. `molten-example-monte-carlo-bachelier`
+
+覆盖：`randNormalP`、大规模 payoff / reduction、固定 seed 的统计稳定性检查。
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-monte-carlo-bachelier
+```
+
+可选参数：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run molten-example-monte-carlo-bachelier -- --paths 8000000 --seed 12345 --spot 100 --strike 100 --sigma 20 --sqrtT 1
+```
+
+默认会重复两次同 seed 运行，检查结果重现性、非负价格与 95% 置信区间的基本一致性。失败时直接退出失败。
+
 ## 测试策略
 
 测试分成三类：

@@ -17,6 +17,8 @@ extra-source-files:
 - docs/plans/2026-03-08-molten-array-program-runtime-implementation.md
 - docs/plans/2026-03-08-molten-cpu-reference-evaluator-design.md
 - docs/plans/2026-03-08-molten-cpu-reference-evaluator-implementation.md
+- docs/plans/2026-03-08-molten-example-suite-design.md
+- docs/plans/2026-03-08-molten-example-suite-implementation.md
 
 description: Please see the README on GitHub at <https://github.com/pe200012/molten#readme>
 
@@ -71,6 +73,10 @@ library:
   - Molten.Core.Future
   - Molten.Core.Stream
   - Molten.Core.Transfer
+  - Molten.Examples.Common
+  - Molten.Examples.Heat2dFft
+  - Molten.Examples.MlpForward
+  - Molten.Examples.MonteCarloBachelier
   - Molten.FFT
   - Molten.FFT.Runtime
   - Molten.Internal.HIPRTC
@@ -85,6 +91,36 @@ executables:
   molten-exe:
     main: Main.hs
     source-dirs: app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - molten
+
+  molten-example-mlp-forward:
+    main: Main.hs
+    source-dirs: app/mlp-forward
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - molten
+
+  molten-example-heat2d-fft:
+    main: Main.hs
+    source-dirs: app/heat2d-fft
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - molten
+
+  molten-example-monte-carlo-bachelier:
+    main: Main.hs
+    source-dirs: app/monte-carlo-bachelier
     ghc-options:
     - -threaded
     - -rtsopts

@@ -117,6 +117,14 @@ instance NumericExp Word32 where
   addScalar = (+)
   mulScalar = (*)
 
+instance NumericExp (Complex Float) where
+  addScalar = (+)
+  mulScalar = (*)
+
+instance NumericExp (Complex Double) where
+  addScalar = (+)
+  mulScalar = (*)
+
 instance Comparable Float where
   lessThanScalar = (<)
 
@@ -292,8 +300,8 @@ renderExpression expression =
     CastExp inner -> "((" <> expressionTypeCName expression <> ")(" <> renderExpression inner <> "))"
     SelectExp predicate ifTrue ifFalse ->
       "(" <> renderExpression predicate <> " ? " <> wrapRenderedExpression ifTrue <> " : " <> wrapRenderedExpression ifFalse <> ")"
-    AddExp left right -> binaryOperator "+" left right
-    MulExp left right -> binaryOperator "*" left right
+    AddExp left right -> renderAddExpression left right
+    MulExp left right -> renderMulExpression left right
     LessThanExp left right -> binaryOperator "<" left right
 
 renderUnaryExpression :: (ArrayScalar a, ArrayScalar b) => Unary a b -> String
@@ -323,6 +331,24 @@ expressionTypeCName expression =
 binaryOperator :: String -> Exp a -> Exp a -> String
 binaryOperator symbol left right =
   "((" <> renderExpression left <> ") " <> symbol <> " (" <> renderExpression right <> "))"
+
+renderAddExpression :: forall a. NumericExp a => Exp a -> Exp a -> String
+renderAddExpression left right =
+  case arrayScalarTypeName (Proxy :: Proxy a) of
+    "ComplexFloat" -> renderFunctionCall "molten_add_float2" left right
+    "ComplexDouble" -> renderFunctionCall "molten_add_double2" left right
+    _ -> binaryOperator "+" left right
+
+renderMulExpression :: forall a. NumericExp a => Exp a -> Exp a -> String
+renderMulExpression left right =
+  case arrayScalarTypeName (Proxy :: Proxy a) of
+    "ComplexFloat" -> renderFunctionCall "molten_mul_float2" left right
+    "ComplexDouble" -> renderFunctionCall "molten_mul_double2" left right
+    _ -> binaryOperator "*" left right
+
+renderFunctionCall :: String -> Exp a -> Exp a -> String
+renderFunctionCall functionName left right =
+  functionName <> "(" <> renderExpression left <> ", " <> renderExpression right <> ")"
 
 renderFloatLiteral :: RealFloat a => a -> String
 renderFloatLiteral value =
