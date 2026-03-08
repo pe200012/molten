@@ -17,6 +17,7 @@ import Molten.Array.Program
   , fftInverseP
   , fillArrayP
   , gemmMatrixP
+  , inputArray
   , inputDeviceArray
   , mapExpr
   , randUniformP
@@ -28,6 +29,7 @@ import Molten.Array.Program
 import Molten.Array.Transfer (copyHostArrayToDevice, readDeviceArrayToHostArray)
 import Molten.BLAS.Types (Transpose(NoTranspose))
 import Molten.RAND.Runtime (RandGeneratorConfig(..))
+import Molten.Reference (runProgramCpu)
 import Molten.TestSupport (withGpuContext)
 import ROCm.RocRAND (pattern RocRandRngPseudoDefault)
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
@@ -61,6 +63,58 @@ spec = do
           resultArray <- runProgram runtime program
           hostArray <- readDeviceArrayToHostArray ctx resultArray
           AM.toStorableVector hostArray `shouldBe` VS.fromList [10, 10, 10, 10 :: Int32]
+
+    it "uploads inputArray inputs before running on GPU" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let arr = AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [1, 2, 3, 4 :: Int32])
+          program <-
+            buildProgram $ do
+              input0 <- inputArray arr
+              mapExpr (Unary (\x -> x .+. constant 1)) input0
+          resultArray <- runProgram runtime program
+          hostArray <- readDeviceArrayToHostArray ctx resultArray
+          AM.toStorableVector hostArray `shouldBe` VS.fromList [2, 3, 4, 5 :: Int32]
+
+    it "matches CPU reference for inputArray -> mapExpr -> reduceAll" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let input = (AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [1, 2, 3, 4 :: Int32])) :: A.Array A.S A.Ix1 Int32
+          program <-
+            buildProgram $ do
+              value0 <- inputArray input
+              value1 <- mapExpr (Unary (\x -> x .+. constant 1)) value0
+              reduceAll (Binary (\x y -> x .+. y)) 0 value1
+          cpuResult <- runProgramCpu program
+          gpuResult <- runProgram runtime program
+          gpuHost <- readDeviceArrayToHostArray ctx gpuResult
+          AM.toStorableVector gpuHost `shouldBe` AM.toStorableVector cpuResult
+
+    it "matches CPU reference for inputArray -> gemmMatrixP" $
+      withGpuContext $ \ctx ->
+        withProgramRuntime ctx $ \runtime -> do
+          let a = (AMV.fromVector' A.Seq (A.Sz2 2 2) (VS.fromList [1, 2, 3, 4 :: Float])) :: A.Array A.S A.Ix2 Float
+              b = (AMV.fromVector' A.Seq (A.Sz2 2 2) (VS.fromList [5, 6, 7, 8 :: Float])) :: A.Array A.S A.Ix2 Float
+              c0 = (AMV.fromVector' A.Seq (A.Sz2 2 2) (VS.fromList [0, 0, 0, 0 :: Float])) :: A.Array A.S A.Ix2 Float
+          program <-
+            buildProgram $ do
+              a0 <- inputArray a
+              b0 <- inputArray b
+              cInit <- inputArray c0
+              gemmMatrixP
+                MatrixGemmValue
+                  { matrixGemmValueTransA = NoTranspose
+                  , matrixGemmValueTransB = NoTranspose
+                  , matrixGemmValueAlpha = 1
+                  , matrixGemmValueA = a0
+                  , matrixGemmValueB = b0
+                  , matrixGemmValueBeta = 0
+                  , matrixGemmValueC = cInit
+                  }
+          cpuResult <- runProgramCpu program
+          gpuResult <- runProgram runtime program
+          gpuHost <- readDeviceArrayToHostArray ctx gpuResult
+          AM.toStorableVector gpuHost `shouldBe` AM.toStorableVector cpuResult
 
   describe "BLAS / FFT / RAND nodes" $ do
     it "runs randUniformP -> mapExpr -> gemmMatrixP in one program" $

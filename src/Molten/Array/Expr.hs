@@ -6,13 +6,15 @@
 module Molten.Array.Expr
   ( ArrayScalar(..)
   , Binary(..)
-  , Castable
-  , Comparable
+  , Castable(..)
+  , Comparable(..)
   , Exp
-  , NumericExp
+  , NumericExp(..)
   , Unary(..)
   , cast
   , constant
+  , evaluateBinaryExpression
+  , evaluateUnaryExpression
   , renderBinaryExpression
   , renderExpression
   , renderUnaryExpression
@@ -36,13 +38,15 @@ class Storable a => ArrayScalar a where
   arrayScalarCType :: proxy a -> String
   renderScalarLiteral :: a -> String
 
-class ArrayScalar a => NumericExp a
+class ArrayScalar a => NumericExp a where
+  addScalar :: a -> a -> a
+  mulScalar :: a -> a -> a
 
-class ArrayScalar a => Comparable a
+class ArrayScalar a => Comparable a where
+  lessThanScalar :: a -> a -> Bool
 
-class (ArrayScalar a, ArrayScalar b) => Castable a b
-
-instance (ArrayScalar a, ArrayScalar b) => Castable a b
+class (ArrayScalar a, ArrayScalar b) => Castable a b where
+  castScalar :: a -> b
 
 infixl 6 .+.
 infixl 7 .*.
@@ -93,18 +97,133 @@ instance ArrayScalar (Complex Double) where
   renderScalarLiteral (realPart :+ imagPart) =
     "make_double2(" <> renderFloatLiteral realPart <> ", " <> renderFloatLiteral imagPart <> ")"
 
-instance NumericExp Float
-instance NumericExp Double
-instance NumericExp Int32
-instance NumericExp Int64
-instance NumericExp Word32
+instance NumericExp Float where
+  addScalar = (+)
+  mulScalar = (*)
 
-instance Comparable Float
-instance Comparable Double
-instance Comparable Int32
-instance Comparable Int64
-instance Comparable Word32
-instance Comparable Bool
+instance NumericExp Double where
+  addScalar = (+)
+  mulScalar = (*)
+
+instance NumericExp Int32 where
+  addScalar = (+)
+  mulScalar = (*)
+
+instance NumericExp Int64 where
+  addScalar = (+)
+  mulScalar = (*)
+
+instance NumericExp Word32 where
+  addScalar = (+)
+  mulScalar = (*)
+
+instance Comparable Float where
+  lessThanScalar = (<)
+
+instance Comparable Double where
+  lessThanScalar = (<)
+
+instance Comparable Int32 where
+  lessThanScalar = (<)
+
+instance Comparable Int64 where
+  lessThanScalar = (<)
+
+instance Comparable Word32 where
+  lessThanScalar = (<)
+
+instance Comparable Bool where
+  lessThanScalar = (<)
+
+instance Castable Float Float where
+  castScalar = id
+
+instance Castable Double Double where
+  castScalar = id
+
+instance Castable Int32 Int32 where
+  castScalar = id
+
+instance Castable Int64 Int64 where
+  castScalar = id
+
+instance Castable Word32 Word32 where
+  castScalar = id
+
+instance Castable Bool Bool where
+  castScalar = id
+
+instance Castable (Complex Float) (Complex Float) where
+  castScalar = id
+
+instance Castable (Complex Double) (Complex Double) where
+  castScalar = id
+
+instance Castable Float Double where
+  castScalar = realToFrac
+
+instance Castable Double Float where
+  castScalar = realToFrac
+
+instance Castable Int32 Float where
+  castScalar = fromIntegral
+
+instance Castable Int32 Double where
+  castScalar = fromIntegral
+
+instance Castable Int32 Int64 where
+  castScalar = fromIntegral
+
+instance Castable Int32 Word32 where
+  castScalar = fromIntegral
+
+instance Castable Int64 Float where
+  castScalar = fromIntegral
+
+instance Castable Int64 Double where
+  castScalar = fromIntegral
+
+instance Castable Int64 Int32 where
+  castScalar = fromIntegral
+
+instance Castable Int64 Word32 where
+  castScalar = fromIntegral
+
+instance Castable Word32 Float where
+  castScalar = fromIntegral
+
+instance Castable Word32 Double where
+  castScalar = fromIntegral
+
+instance Castable Word32 Int32 where
+  castScalar = fromIntegral
+
+instance Castable Word32 Int64 where
+  castScalar = fromIntegral
+
+instance Castable Float Int32 where
+  castScalar = truncate
+
+instance Castable Float Int64 where
+  castScalar = truncate
+
+instance Castable Float Word32 where
+  castScalar = truncate
+
+instance Castable Double Int32 where
+  castScalar = truncate
+
+instance Castable Double Int64 where
+  castScalar = truncate
+
+instance Castable Double Word32 where
+  castScalar = truncate
+
+instance Castable (Complex Float) (Complex Double) where
+  castScalar (realPart :+ imagPart) = realToFrac realPart :+ realToFrac imagPart
+
+instance Castable (Complex Double) (Complex Float) where
+  castScalar (realPart :+ imagPart) = realToFrac realPart :+ realToFrac imagPart
 
 data Exp a where
   VarExp :: ArrayScalar a => String -> Exp a
@@ -142,6 +261,28 @@ binary = Binary
 
 (.<.) :: Comparable a => Exp a -> Exp a -> Exp Bool
 (.<.) = LessThanExp
+
+evaluateUnaryExpression :: (ArrayScalar a, ArrayScalar b) => Unary a b -> a -> b
+evaluateUnaryExpression (Unary function) value =
+  evaluateExpression (function (ConstantExp value))
+
+evaluateBinaryExpression :: (ArrayScalar a, ArrayScalar b, ArrayScalar c) => Binary a b c -> a -> b -> c
+evaluateBinaryExpression (Binary function) leftValue rightValue =
+  evaluateExpression (function (ConstantExp leftValue) (ConstantExp rightValue))
+
+evaluateExpression :: Exp a -> a
+evaluateExpression expression =
+  case expression of
+    VarExp name -> error ("evaluateExpression: free variable " <> name)
+    ConstantExp value -> value
+    CastExp inner -> castScalar (evaluateExpression inner)
+    SelectExp predicate ifTrue ifFalse ->
+      if evaluateExpression predicate
+        then evaluateExpression ifTrue
+        else evaluateExpression ifFalse
+    AddExp left right -> addScalar (evaluateExpression left) (evaluateExpression right)
+    MulExp left right -> mulScalar (evaluateExpression left) (evaluateExpression right)
+    LessThanExp left right -> lessThanScalar (evaluateExpression left) (evaluateExpression right)
 
 renderExpression :: Exp a -> String
 renderExpression expression =

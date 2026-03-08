@@ -9,6 +9,7 @@ import qualified Data.Massiv.Array.Manifest as AM
 import Molten.Array.Transfer (copyHostArrayToDevice, readDeviceArrayToHostArray)
 import Molten.BLAS (MatrixGemm(..), axpyVector, dotVector, gemmMatrix)
 import Molten.BLAS.Types (Transpose(..))
+import Molten.Reference (MatrixGemmRef(..), axpyVectorRef, dotVectorRef, gemmMatrixRef)
 import Molten.TestSupport (withBlasContext)
 import ROCm.FFI.Core.Exception (ArgumentError(..))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy, shouldThrow)
@@ -24,6 +25,17 @@ spec = do
         devY <- copyHostArrayToDevice ctx y
         axpyVector ctx 3 devX devY `shouldThrow` isArgumentError "axpyVector" "same length"
 
+    it "matches axpyVectorRef" $
+      withBlasContext $ \ctx -> do
+        let x = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz1 4) ([1, 2, 3, 4 :: Float] !!) :: A.Array A.D A.Ix1 Float)
+            y = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz1 4) ([10, 20, 30, 40 :: Float] !!) :: A.Array A.D A.Ix1 Float)
+        expected <- axpyVectorRef 2 x y
+        devX <- copyHostArrayToDevice ctx x
+        devY <- copyHostArrayToDevice ctx y
+        axpyVector ctx 2 devX devY
+        out <- readDeviceArrayToHostArray ctx devY
+        AM.toStorableVector out `shouldBe` AM.toStorableVector expected
+
   describe "dotVector" $ do
     it "computes a host-visible scalar result for Ix1 device arrays" $
       withBlasContext $ \ctx -> do
@@ -34,6 +46,16 @@ spec = do
         result <- dotVector ctx devX devY
         result `shouldSatisfy` approxEq 64
 
+    it "matches dotVectorRef" $
+      withBlasContext $ \ctx -> do
+        let x = (A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz1 3) ([2, 4, 6 :: Float] !!) :: A.Array A.D A.Ix1 Float)) :: A.Array A.S A.Ix1 Float
+            y = (A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz1 3) ([4, 5, 6 :: Float] !!) :: A.Array A.D A.Ix1 Float)) :: A.Array A.S A.Ix1 Float
+        expected <- dotVectorRef x y
+        devX <- copyHostArrayToDevice ctx x
+        devY <- copyHostArrayToDevice ctx y
+        result <- dotVector ctx devX devY
+        result `shouldSatisfy` approxEq expected
+
   describe "gemmMatrix" $ do
     it "infers row-major gemm dimensions from Ix2 device arrays" $
       withBlasContext $ \ctx -> do
@@ -41,6 +63,39 @@ spec = do
             b = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) ([5, 6, 7, 8 :: Float] !!) :: A.Array A.D A.Ix2 Float)
             c0 = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) (const 0) :: A.Array A.D A.Ix2 Float)
             expected = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) ([19, 22, 43, 50 :: Float] !!) :: A.Array A.D A.Ix2 Float)
+        devA <- copyHostArrayToDevice ctx a
+        devB <- copyHostArrayToDevice ctx b
+        devC <- copyHostArrayToDevice ctx c0
+        gemmMatrix
+          ctx
+          MatrixGemm
+            { matrixGemmTransA = NoTranspose
+            , matrixGemmTransB = NoTranspose
+            , matrixGemmAlpha = 1
+            , matrixGemmA = devA
+            , matrixGemmB = devB
+            , matrixGemmBeta = 0
+            , matrixGemmC = devC
+            }
+        out <- readDeviceArrayToHostArray ctx devC
+        AM.toStorableVector out `shouldBe` AM.toStorableVector expected
+
+    it "matches gemmMatrixRef" $
+      withBlasContext $ \ctx -> do
+        let a = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) ([1, 2, 3, 4 :: Float] !!) :: A.Array A.D A.Ix2 Float)
+            b = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) ([5, 6, 7, 8 :: Float] !!) :: A.Array A.D A.Ix2 Float)
+            c0 = A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 2) (const 0) :: A.Array A.D A.Ix2 Float)
+        expected <-
+          gemmMatrixRef
+            MatrixGemmRef
+              { matrixGemmRefTransA = NoTranspose
+              , matrixGemmRefTransB = NoTranspose
+              , matrixGemmRefAlpha = 1
+              , matrixGemmRefA = a
+              , matrixGemmRefB = b
+              , matrixGemmRefBeta = 0
+              , matrixGemmRefC = c0
+              }
         devA <- copyHostArrayToDevice ctx a
         devB <- copyHostArrayToDevice ctx b
         devC <- copyHostArrayToDevice ctx c0

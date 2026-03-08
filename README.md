@@ -1,21 +1,52 @@
 # molten
 
-`molten` 是建立在 `haskell-rocm` 低层绑定之上的高层 Haskell ROCm API 原型。当前 MVP 已实现：
+`molten` 是建立在 `haskell-rocm` 低层绑定之上的高层 Haskell ROCm API 原型。当前已实现四层能力：
 
-- 显式 `Context`
-- `Host` / `PinnedHost` / `Device` 线性 `Buffer`
-- 同步 / 异步传输与 `GpuFuture`
-- `vector` 互操作
-- rocBLAS `axpy` / `dot` / `dotInto` / `gemmNative`
-- 高层 row-major `gemm`
+- **运行时 + BLAS MVP**
+  - 显式 `Context`
+  - `Host` / `PinnedHost` / `Device` 线性 `Buffer`
+  - 同步 / 异步传输与 `GpuFuture`
+  - rocBLAS `axpy` / `dot` / `dotInto` / `gemmNative`
+  - 高层 row-major `gemm`
+- **数组互操作层**
+  - `vector` 互操作
+  - `massiv` 多维数组互操作
+  - 轻量 `DeviceArray ix a` 设备侧 shape wrapper
+  - eager `DeviceArray` reshape / clone / host / pinned roundtrip
+  - shape-aware BLAS：`axpyVector` / `dotVector` / `gemmMatrix`
+- **独立运行时**
+  - `ArrayRuntime`：typed EDSL + hipRTC JIT one-shot kernels
+  - `FftRuntime`：rocFFT plan cache / workspace 管理
+  - `RandRuntime`：rocRAND generator cache / seed / stream 绑定
+- **staged Program**
+  - SSA `Value ix a`
+  - JIT / BLAS / FFT / RAND 混合节点
+  - DAG 调度与保守多 stream 执行
+- **CPU reference evaluator**
+  - `inputArray` host 输入边界
+  - `runProgramCpu` 解释基础数组节点与 shape-aware BLAS
+  - `axpyVectorRef` / `dotVectorRef` / `gemmMatrixRef`
+  - 便于 GPU-vs-CPU correctness 对照
 
 ## 目录结构
 
 - `src/Molten/Core/*`：context、stream、event、buffer、future、transfer
-- `src/Molten/BLAS*`：native BLAS 与高层 BLAS
+- `src/Molten/BLAS*`：native BLAS、shape-aware BLAS 与 GEMM 类型
+- `src/Molten/Array/Device.hs`：`DeviceArray ix a`
+- `src/Molten/Array/Transfer.hs`：eager device-array copy / reshape / clone
+- `src/Molten/Array/Expr.hs`：typed array EDSL
+- `src/Molten/Array/Runtime.hs`：hipRTC JIT one-shot kernels
+- `src/Molten/Array/Program.hs`：SSA + DAG `Program`
+- `src/Molten/FFT*`：rocFFT runtime 与 eager FFT API
+- `src/Molten/RAND*`：rocRAND runtime 与 eager RAND API
+- `src/Molten/Reference.hs`：CPU reference evaluator 公开入口
+- `src/Molten/Internal/Reference/*`：CPU reference helper 内部实现
 - `src/Molten/Interop/Vector.hs`：`Data.Vector.Storable` 互操作
+- `src/Molten/Interop/Massiv.hs`：`massiv` 多维数组互操作
 - `test/*`：纯测试与 GPU 集成测试
-- `docs/plans/2026-03-08-molten-highlevel-rocm-design.md`：设计文件
+- `docs/plans/2026-03-08-molten-highlevel-rocm-design.md`：高层 ROCm 设计
+- `docs/plans/2026-03-08-molten-massiv-adapter-design.md`：`massiv` adapter 设计
+- `docs/plans/2026-03-08-molten-array-program-runtime-design.md`：array runtime / FFT / RAND / Program 设计
 
 ## 构建
 
@@ -24,6 +55,8 @@
 - `rocm-ffi-core`
 - `rocm-hip-runtime`
 - `rocm-rocblas`
+- `rocm-rocfft`
+- `rocm-rocrand`
 
 当前 `stack.yaml` 还显式加入了：
 
@@ -41,40 +74,137 @@ stack test
 stack run
 ```
 
+在当前 `gfx1103` 环境上，为了让 eager `Context` 初始化下的 rocBLAS 测试与 demo 正常运行，可使用：
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack test
+HSA_OVERRIDE_GFX_VERSION=11.0.0 stack run
+```
+
 ## 测试策略
 
-测试分成两类：
+测试分成三类：
 
-1. **纯测试**：不依赖 GPU，覆盖参数校验与 row-major → column-major 的参数改写。
-2. **GPU 集成测试**：覆盖 sync / async transfer 与 BLAS 数值正确性。
+1. **纯测试**：不依赖 GPU，覆盖参数校验、row-major → column-major 的参数改写，以及 `massiv` shape / rebuild 校验。
+2. **GPU 运行时测试**：覆盖 sync / async transfer。
+3. **GPU 集成测试**：覆盖 BLAS 与 `massiv` roundtrip。
 
 如果当前机器没有可用 ROCm GPU，相关测试会被跳过。
 
-如果 `Context` 在当前环境下无法完成初始化，GPU 相关测试会以 `pending` 形式报告，并直接显示底层异常信息。
+GPU 相关测试假设当前环境可以成功创建 `Context`。如果 ROCm/rocBLAS 运行时本身不可用，测试会直接失败，这被视为环境问题而不是测试层的可恢复条件。
 
-## 最小示例
+## `massiv` 互操作
+
+`Molten.Interop.Massiv` 提供两类 bridge：
+
+- `withHostBufferFromArray` / `readHostBufferToArray`
+- `withPinnedBufferFromArray` / `readPinnedBufferToArray`
+
+输入数组会先显式物化到 `Manifest`，再按 **row-major linear order** 进入 `Buffer` 世界。输出统一恢复为 `Array S ix e`。
+
+设备侧多维 shape 由 `DeviceArray ix a` 保存：
+
+```haskell
+data DeviceArray ix a
+```
+
+它是对底层 `Buffer 'Device a` 的轻量 wrapper，不重做资源管理。
+
+## 最小 `massiv` 示例
 
 ```haskell
 import Molten
-import qualified Data.Vector.Storable as VS
+import qualified Data.Massiv.Array as A
+import qualified Data.Massiv.Array.Manifest as AM
 
 main :: IO ()
 main =
   withContext (DeviceId 0) $ \ctx -> do
-    let input = VS.fromList [1 .. 8 :: Float]
-        n = VS.length input
+    let arr =
+          (A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz2 2 3) fromIntegral :: A.Array A.D A.Ix2 Int))
+            :: A.Array A.S A.Ix2 Int
 
-    withHostBufferFromVector input $ \hostIn ->
-      withDeviceBuffer ctx n $ \deviceBuf ->
-        withHostBuffer n $ \hostOut -> do
-          copyH2D ctx deviceBuf hostIn
-          copyD2H ctx hostOut deviceBuf
-          out <- readHostBufferToVector hostOut
-          print out
+    withPinnedBufferFromArray arr $ \sz pinnedIn ->
+      withDeviceArray ctx sz $ \dev ->
+        withPinnedBufferFromArray arr $ \_ pinnedOut -> do
+          upload <- copyH2DAsync (contextDefaultStream ctx) (deviceArrayBuffer dev) pinnedIn
+          () <- await upload
+          download <- copyD2HAsync (contextDefaultStream ctx) pinnedOut (deviceArrayBuffer dev)
+          () <- await download
+          out <- readPinnedBufferToArray sz pinnedOut
+          print (AM.toStorableVector out)
+```
+
+## 最小 Program 示例
+
+```haskell
+import Molten
+import qualified Data.Massiv.Array as A
+
+main :: IO ()
+main =
+  withContext (DeviceId 0) $ \ctx ->
+    withProgramRuntime ctx $ \rt -> do
+      prog <- buildProgram $ do
+        x <- fillArrayP @A.Ix1 @Float 2 (A.Sz1 8)
+        y <- mapExpr (Unary (\v -> v .+. constant 1)) x
+        reduceAll (Binary (\a b -> a .+. b)) 0 y
+      out <- runProgram rt prog
+      host <- readDeviceArrayToHostArray ctx out
+      print host
+```
+
+Program 层当前支持：
+
+- JIT `fill` / `map` / `zipWith` / `reduceAll`
+- shape-aware BLAS 节点
+- FFT forward / inverse 节点
+- RAND uniform / normal 节点
+- 保守 DAG + 多 stream 调度
+
+## CPU reference evaluator
+
+`Molten.Reference` 提供测试用 CPU reference evaluator。它不是正式 CPU backend，也不模拟 stream、event 或 async 语义。它的职责是：用 `massiv Array S` 解释同一份 `Program`，产出可与 GPU 读回结果直接比较的 host 结果。
+
+当前公开入口包括：
+
+- `runProgramCpu`
+- `mapArrayRef`
+- `zipWithArrayRef`
+- `reduceAllArrayRef`
+- `reshapeArrayRef`
+- `axpyVectorRef`
+- `dotVectorRef`
+- `gemmMatrixRef`
+
+当前限制：
+
+- `runProgramCpu` 只支持 `inputArray`
+- 遇到 `inputDeviceArray` 会直接报错
+- 只解释基础数组节点与 shape-aware BLAS
+- 还不支持 FFT / RAND 节点
+
+最小示例：
+
+```haskell
+import Molten
+import qualified Data.Massiv.Array as A
+import qualified Data.Massiv.Array.Manifest.Vector as AMV
+import qualified Data.Vector.Storable as VS
+
+main :: IO ()
+main = do
+  let input = AMV.fromVector' A.Seq (A.Sz1 4) (VS.fromList [1, 2, 3, 4 :: Int])
+  prog <- buildProgram $ do
+    x <- inputArray input
+    y <- mapExpr (Unary (\v -> v .+. constant 1)) x
+    reduceAll (Binary (\a b -> a .+. b)) 0 y
+  print =<< runProgramCpu prog
 ```
 
 ## 设计取舍
 
-- `Context` 现在在创建时就立即初始化默认 BLAS handle。这样 `Context` 的可用性与 BLAS 运行时状态保持一致。
+- `Context` 在创建时立即初始化默认 BLAS handle。这样 `Context` 的可用性与 BLAS 运行时状态保持一致。
 - 高层 `dot` 返回主机可见标量，因此它是显式同步边界；`dotInto` 则把结果留在 device buffer。
 - 高层 `gemm` 默认按 row-major 解释；`gemmNative` 保留 column-major 语义。
+- `massiv` 输入先显式物化到 `Manifest`；设备侧 shape 由 `DeviceArray ix a` 保存；host/pinned/device 之间继续复用既有 `Buffer` 与 transfer 层。

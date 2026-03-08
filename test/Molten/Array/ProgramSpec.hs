@@ -11,6 +11,7 @@ import Molten.Array.Expr (Binary(..), Unary(..), constant, (.+.))
 import Molten.Array.Program
   ( buildProgram
   , fillArrayP
+  , inputArray
   , mapExpr
   , programNodeDependencies
   , programNodeIds
@@ -58,6 +59,17 @@ spec = do
           input0 <- fillArrayP @A.Ix1 @Int32 2 (A.Sz1 4)
           reduceAll (Binary (\x y -> x .+. y)) 0 input0
       valueSize (programResultValue program) `shouldBe` A.Sz1 1
+
+    it "accepts host array inputs in Program" $ do
+      let arr =
+            (A.computeAs A.S (A.makeArrayLinear A.Seq (A.Sz1 4) (fromIntegral @Int @Int32) :: A.Array A.D A.Ix1 Int32))
+              :: A.Array A.S A.Ix1 Int32
+      program <-
+        buildProgram $ do
+          input0 <- inputArray arr
+          mapExpr (Unary (\x -> x .+. constant 1)) input0
+      programNodeIds program `shouldBe` [0, 1]
+      programNodeDependencies program `shouldBe` [(0, []), (1, [0])]
 
     it "rejects reshapeValue when totalElem changes" $
       buildProgram

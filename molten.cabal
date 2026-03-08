@@ -24,6 +24,8 @@ extra-source-files:
     docs/plans/2026-03-08-molten-massiv-adapter-implementation.md
     docs/plans/2026-03-08-molten-array-program-runtime-design.md
     docs/plans/2026-03-08-molten-array-program-runtime-implementation.md
+    docs/plans/2026-03-08-molten-cpu-reference-evaluator-design.md
+    docs/plans/2026-03-08-molten-cpu-reference-evaluator-implementation.md
 
 source-repository head
   type: git
@@ -54,10 +56,14 @@ library
       Molten.Interop.Vector
       Molten.RAND
       Molten.RAND.Runtime
+      Molten.Reference
   other-modules:
       Lib
       Molten.Core.Types
       Molten.Internal.Device
+      Molten.Internal.Reference.Array
+      Molten.Internal.Reference.BLAS
+      Molten.Internal.Reference.Program
       Molten.Internal.Validation
       Paths_molten
   autogen-modules:
@@ -142,6 +148,9 @@ test-suite molten-test
       Molten.Interop.MassivSpec
       Molten.RAND.GpuSpec
       Molten.RAND.RuntimeSpec
+      Molten.Reference.ArraySpec
+      Molten.Reference.BlasSpec
+      Molten.Reference.ProgramSpec
       Molten.TestSupport
       Paths_molten
   autogen-modules:

@@ -12,6 +12,7 @@ module Molten.Array.Program
   , ProgramBuilder
   , ProgramOutput(..)
   , ProgramRuntime
+  , ReferenceOutput(..)
   , Value
   , axpyVectorP
   , buildProgram
@@ -19,6 +20,7 @@ module Molten.Array.Program
   , fftForwardP
   , fftInverseP
   , gemmMatrixP
+  , inputArray
   , inputDeviceArray
   , mapExpr
   , programNodeDependencies
@@ -29,6 +31,7 @@ module Molten.Array.Program
   , reduceAll
   , reshapeValue
   , runProgram
+  , runProgramCpu
   , scheduleProgram
   , valueId
   , valueSize
@@ -57,7 +60,9 @@ import Molten.Array.Runtime
   , withArrayRuntime
   , zipWithArrayOn
   )
-import Molten.Array.Transfer (cloneDeviceArray, reshapeDeviceArray)
+import Molten.Array.Transfer (cloneDeviceArray, copyHostArrayToDevice, reshapeDeviceArray)
+import Molten.Internal.Reference.Array (fillArrayRef, mapArrayRef, reduceAllArrayRef, reshapeArrayRef, zipWithArrayRef)
+import Molten.Internal.Reference.BLAS (MatrixGemmRef(..), axpyVectorRef, gemmMatrixRef)
 import Molten.BLAS (MatrixGemm(..), axpyVector, gemmMatrix)
 import Molten.BLAS.Types (BlasElement, Transpose)
 import Molten.Core.Buffer (newDeviceBufferOn)
@@ -119,6 +124,9 @@ data ProgramNode
     (A.Index ix, Typeable ix, Typeable a, Storable a) =>
     InputNode !(Value ix a) !(DeviceArray ix a)
   | forall ix a.
+    (A.Index ix, Typeable ix, Typeable a, Storable a) =>
+    HostInputNode !(Value ix a) !(A.Array A.S ix a)
+  | forall ix a.
     (A.Index ix, Typeable ix, Typeable a, ArrayScalar a) =>
     FillNode !(Value ix a) !a
   | forall ix a b.
@@ -134,10 +142,10 @@ data ProgramNode
     (A.Index ix, A.Index ix', Typeable ix, Typeable ix', Typeable a, Storable a) =>
     ReshapeNode !(Value ix' a) !(Value ix a)
   | forall a.
-    (Typeable a, BlasElement a) =>
+    (Typeable a, BlasElement a, Num a, Storable a) =>
     AxpyNode !(Value A.Ix1 a) !a !(Value A.Ix1 a) !(Value A.Ix1 a)
   | forall a.
-    (Typeable a, BlasElement a) =>
+    (Typeable a, BlasElement a, Num a, Storable a) =>
     GemmNode !(Value A.Ix2 a) !(MatrixGemmValue a)
   | forall ix a.
     (A.Index ix, Typeable ix, Typeable a, FftShape ix, FftComplex a) =>
@@ -171,6 +179,25 @@ instance (ProgramOutput a, ProgramOutput b) => ProgramOutput (a, b) where
     right <- resolveProgramOutput store b
     pure (left, right)
 
+class ReferenceOutput a where
+  type ReferenceResult a
+  resolveReferenceOutput :: ReferenceStore -> a -> IO (ReferenceResult a)
+
+instance (A.Index ix, Typeable ix, Typeable a, Storable a) => ReferenceOutput (Value ix a) where
+  type ReferenceResult (Value ix a) = A.Array A.S ix a
+  resolveReferenceOutput store value = lookupStoredReferenceValue "resolveReferenceOutput" store value
+
+instance ReferenceOutput () where
+  type ReferenceResult () = ()
+  resolveReferenceOutput _ () = pure ()
+
+instance (ReferenceOutput a, ReferenceOutput b) => ReferenceOutput (a, b) where
+  type ReferenceResult (a, b) = (ReferenceResult a, ReferenceResult b)
+  resolveReferenceOutput store (a, b) = do
+    left <- resolveReferenceOutput store a
+    right <- resolveReferenceOutput store b
+    pure (left, right)
+
 withProgramRuntime :: HasCallStack => Context -> (ProgramRuntime -> IO a) -> IO a
 withProgramRuntime ctx action =
   withArrayRuntime ctx $ \arrayRuntime ->
@@ -198,6 +225,12 @@ inputDeviceArray :: (A.Index ix, Typeable ix, Typeable a, Storable a) => DeviceA
 inputDeviceArray deviceArray = do
   value <- freshValue (deviceArraySize deviceArray)
   emitNode (InputNode value deviceArray)
+  pure value
+
+inputArray :: (A.Index ix, Typeable ix, Typeable a, Storable a) => A.Array A.S ix a -> ProgramBuilder (Value ix a)
+inputArray array = do
+  value <- freshValue (A.size array)
+  emitNode (HostInputNode value array)
   pure value
 
 fillArrayP :: (A.Index ix, Typeable ix, Typeable a, ArrayScalar a) => a -> A.Sz ix -> ProgramBuilder (Value ix a)
@@ -236,14 +269,14 @@ reshapeValue targetSize inputValue = do
   emitNode (ReshapeNode outputValue inputValue)
   pure outputValue
 
-axpyVectorP :: (Typeable a, BlasElement a) => a -> Value A.Ix1 a -> Value A.Ix1 a -> ProgramBuilder (Value A.Ix1 a)
+axpyVectorP :: (Typeable a, BlasElement a, Num a, Storable a) => a -> Value A.Ix1 a -> Value A.Ix1 a -> ProgramBuilder (Value A.Ix1 a)
 axpyVectorP alpha xValue yValue = do
   when (valueSize xValue /= valueSize yValue) (liftIO (throwArgumentError "axpyVectorP" "input vectors must have the same shape"))
   outputValue <- freshValue (valueSize yValue)
   emitNode (AxpyNode outputValue alpha xValue yValue)
   pure outputValue
 
-gemmMatrixP :: (Typeable a, BlasElement a) => MatrixGemmValue a -> ProgramBuilder (Value A.Ix2 a)
+gemmMatrixP :: (Typeable a, BlasElement a, Num a, Storable a) => MatrixGemmValue a -> ProgramBuilder (Value A.Ix2 a)
 gemmMatrixP matrixSpec = do
   outputValue <- freshValue (valueSize (matrixGemmValueC matrixSpec))
   emitNode (GemmNode outputValue matrixSpec)
@@ -295,6 +328,11 @@ runProgram runtime program = do
   valueStore <- executeScheduledProgram runtime scheduledNodes (programNodes program)
   resolveProgramOutput valueStore (programResult program)
 
+runProgramCpu :: (HasCallStack, ReferenceOutput a) => Program a -> IO (ReferenceResult a)
+runProgramCpu program = do
+  referenceStore <- executeReferenceProgram (programNodes program)
+  resolveReferenceOutput referenceStore (programResult program)
+
 freshValue :: A.Sz ix -> ProgramBuilder (Value ix a)
 freshValue size =
   ProgramBuilder $ do
@@ -319,6 +357,68 @@ destroyProgramStreams streams =
   mapM_ destroyStream (drop 1 streams)
 
 type ValueStore = Map Int Dynamic.Dynamic
+
+type ReferenceStore = Map Int Dynamic.Dynamic
+
+executeReferenceProgram :: HasCallStack => [ProgramNode] -> IO ReferenceStore
+executeReferenceProgram = foldM executeReferenceNode Map.empty
+
+executeReferenceNode :: HasCallStack => ReferenceStore -> ProgramNode -> IO ReferenceStore
+executeReferenceNode store node =
+  case node of
+    InputNode _ _ ->
+      throwArgumentError "runProgramCpu" "device-only inputs are not supported by the CPU reference evaluator"
+    HostInputNode outputValue hostArray ->
+      pure (storeReferenceValue store outputValue hostArray)
+    FillNode outputValue fillValue -> do
+      hostArray <- fillArrayRef fillValue (valueSize outputValue)
+      pure (storeReferenceValue store outputValue hostArray)
+    MapNode outputValue unary inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- mapArrayRef unary hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    ZipNode outputValue binary leftValue rightValue -> do
+      leftArray <- lookupStoredReferenceValue "runProgramCpu" store leftValue
+      rightArray <- lookupStoredReferenceValue "runProgramCpu" store rightValue
+      hostArray <- zipWithArrayRef binary leftArray rightArray
+      pure (storeReferenceValue store outputValue hostArray)
+    ReduceNode outputValue binary initialValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- reduceAllArrayRef binary initialValue hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    ReshapeNode outputValue inputValue -> do
+      hostInput <- lookupStoredReferenceValue "runProgramCpu" store inputValue
+      hostArray <- reshapeArrayRef (valueSize outputValue) hostInput
+      pure (storeReferenceValue store outputValue hostArray)
+    AxpyNode outputValue alpha xValue yValue -> do
+      xArray <- lookupStoredReferenceValue "runProgramCpu" store xValue
+      yArray <- lookupStoredReferenceValue "runProgramCpu" store yValue
+      hostArray <- axpyVectorRef alpha xArray yArray
+      pure (storeReferenceValue store outputValue hostArray)
+    GemmNode outputValue matrixSpec -> do
+      aArray <- lookupStoredReferenceValue "runProgramCpu" store (matrixGemmValueA matrixSpec)
+      bArray <- lookupStoredReferenceValue "runProgramCpu" store (matrixGemmValueB matrixSpec)
+      cArray <- lookupStoredReferenceValue "runProgramCpu" store (matrixGemmValueC matrixSpec)
+      hostArray <-
+        gemmMatrixRef
+          MatrixGemmRef
+            { matrixGemmRefTransA = matrixGemmValueTransA matrixSpec
+            , matrixGemmRefTransB = matrixGemmValueTransB matrixSpec
+            , matrixGemmRefAlpha = matrixGemmValueAlpha matrixSpec
+            , matrixGemmRefA = aArray
+            , matrixGemmRefB = bArray
+            , matrixGemmRefBeta = matrixGemmValueBeta matrixSpec
+            , matrixGemmRefC = cArray
+            }
+      pure (storeReferenceValue store outputValue hostArray)
+    FftForwardNode _ _ ->
+      throwArgumentError "runProgramCpu" "unsupported reference node: FftForwardNode"
+    FftInverseNode _ _ ->
+      throwArgumentError "runProgramCpu" "unsupported reference node: FftInverseNode"
+    RandUniformNode _ _ ->
+      throwArgumentError "runProgramCpu" "unsupported reference node: RandUniformNode"
+    RandNormalNode _ _ _ _ ->
+      throwArgumentError "runProgramCpu" "unsupported reference node: RandNormalNode"
 
 executeScheduledProgram :: HasCallStack => ProgramRuntime -> [ScheduledNode] -> [ProgramNode] -> IO ValueStore
 executeScheduledProgram runtime scheduledNodes nodes = do
@@ -354,6 +454,9 @@ executeNode :: HasCallStack => ProgramRuntime -> Stream -> ProgramNode -> ValueS
 executeNode runtime stream node store =
   case node of
     InputNode outputValue deviceArray ->
+      pure (storeValue store outputValue deviceArray, Nothing)
+    HostInputNode outputValue hostArray -> do
+      deviceArray <- copyHostArrayToDevice (programRuntimeContext runtime) hostArray
       pure (storeValue store outputValue deviceArray, Nothing)
     FillNode outputValue fillValue -> do
       deviceArray <- fillArrayOn stream (programRuntimeArrayRuntime runtime) fillValue (valueSize outputValue)
@@ -455,14 +558,25 @@ lookupStoredValue functionName store value =
     Just deviceArray -> pure deviceArray
     Nothing -> throwArgumentError functionName ("missing value: " <> show (valueId value))
 
+lookupStoredReferenceValue :: forall ix a. (A.Index ix, Typeable ix, Typeable a, Storable a) => String -> ReferenceStore -> Value ix a -> IO (A.Array A.S ix a)
+lookupStoredReferenceValue functionName store value =
+  case Map.lookup (valueId value) store >>= Dynamic.fromDynamic of
+    Just hostArray -> pure hostArray
+    Nothing -> throwArgumentError functionName ("missing reference value: " <> show (valueId value))
+
 storeValue :: (Typeable ix, Typeable a) => ValueStore -> Value ix a -> DeviceArray ix a -> ValueStore
 storeValue store outputValue deviceArray =
   Map.insert (valueId outputValue) (Dynamic.toDyn deviceArray) store
+
+storeReferenceValue :: (Typeable ix, Typeable a) => ReferenceStore -> Value ix a -> A.Array A.S ix a -> ReferenceStore
+storeReferenceValue store outputValue hostArray =
+  Map.insert (valueId outputValue) (Dynamic.toDyn hostArray) store
 
 programNodeOutputId :: ProgramNode -> Int
 programNodeOutputId node =
   case node of
     InputNode outputValue _ -> valueId outputValue
+    HostInputNode outputValue _ -> valueId outputValue
     FillNode outputValue _ -> valueId outputValue
     MapNode outputValue _ _ -> valueId outputValue
     ZipNode outputValue _ _ _ -> valueId outputValue
@@ -479,6 +593,7 @@ programNodeInputIds :: ProgramNode -> [Int]
 programNodeInputIds node =
   case node of
     InputNode _ _ -> []
+    HostInputNode _ _ -> []
     FillNode _ _ -> []
     MapNode _ _ inputValue -> [valueId inputValue]
     ZipNode _ _ leftValue rightValue -> [valueId leftValue, valueId rightValue]
@@ -499,6 +614,7 @@ toSchedulerNode node =
     , schedulerNodeResource =
         case node of
           InputNode _ _ -> SchedulerResourceInput
+          HostInputNode _ _ -> SchedulerResourceInput
           FillNode _ _ -> SchedulerResourceJit
           MapNode _ _ _ -> SchedulerResourceJit
           ZipNode _ _ _ _ -> SchedulerResourceJit

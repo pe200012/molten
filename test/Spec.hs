@@ -20,6 +20,9 @@ import qualified Molten.Interop.MassivGpuSpec as MassivGpuSpec
 import qualified Molten.Interop.MassivSpec as MassivSpec
 import qualified Molten.RAND.GpuSpec as RandGpuSpec
 import qualified Molten.RAND.RuntimeSpec as RandRuntimeSpec
+import qualified Molten.Reference.ArraySpec as ReferenceArraySpec
+import qualified Molten.Reference.BlasSpec as ReferenceBlasSpec
+import qualified Molten.Reference.ProgramSpec as ReferenceProgramSpec
 
 main :: IO ()
 main = hspec spec
@@ -45,3 +48,6 @@ spec = do
   describe "Molten.Interop.Massiv.GPU" MassivGpuSpec.spec
   describe "Molten.RAND.Runtime" RandRuntimeSpec.spec
   describe "Molten.RAND.GPU" RandGpuSpec.spec
+  describe "Molten.Reference.Array" ReferenceArraySpec.spec
+  describe "Molten.Reference.Blas" ReferenceBlasSpec.spec
+  describe "Molten.Reference.Program" ReferenceProgramSpec.spec

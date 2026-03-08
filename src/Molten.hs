@@ -19,6 +19,7 @@ module Molten
   , module Molten.Interop.Vector
   , module Molten.RAND
   , module Molten.RAND.Runtime
+  , module Molten.Reference
   ) where
 
 import Molten.Array.Device
@@ -41,3 +42,4 @@ import Molten.Interop.Massiv
 import Molten.Interop.Vector
 import Molten.RAND
 import Molten.RAND.Runtime
+import Molten.Reference
